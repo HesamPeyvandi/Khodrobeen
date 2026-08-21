@@ -57,6 +57,7 @@ SELECTORS = {
     "picker_result_item": '[class*="car-detail__car-name"]',
     "body_status_confirm_button": 'button:has-text("تایید")',
     "color_option": '[class*="selectCarColor_color-name"]',
+    "color_confirm_button": 'button:has-text("تایید")',
     "submit_button": 'button[type="submit"]:has-text("محاسبه قیمت")',
     "result_price_main": '[class*="info-box__price__"]',
     "result_price_range": '[class*="info-box__row-price__"]',
@@ -390,6 +391,13 @@ class HamrahMechanicEstimator:
         if await option.count():
             await option.first.click()
             await page.wait_for_timeout(400)
+
+            confirm = page.locator(SELECTORS["color_confirm_button"])
+            if await confirm.count():
+                await confirm.first.click()
+                await page.wait_for_timeout(300)
+            else:
+                await page.keyboard.press("Escape")
         else:
             logger.warning("Hamrah Mechanic: color '%s' not found in picker, leaving unselected", spec.color)
             await page.keyboard.press("Escape")
