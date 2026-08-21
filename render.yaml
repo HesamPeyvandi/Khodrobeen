@@ -6,6 +6,8 @@ services:
     buildCommand: "pip install -r requirements.txt && playwright install --with-deps chromium"
     startCommand: "python main.py"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: ADMIN_TELEGRAM_IDS
