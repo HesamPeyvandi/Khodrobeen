@@ -71,6 +71,15 @@ class Settings:
     request_delay_seconds: float = float(os.getenv("REQUEST_DELAY_SECONDS", "2.5"))
     max_listings_per_scan: int = _get_int("MAX_LISTINGS_PER_SCAN", 30)
     headless_browser: bool = _get_bool("HEADLESS_BROWSER", True)
+    page_timeout_ms: int = _get_int("PAGE_TIMEOUT_MS", 45000)
+    page_goto_retries: int = _get_int("PAGE_GOTO_RETRIES", 2)
+    # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
+    # Not needed if the scraper runs on a server with fast, unblocked access
+    # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and
+    # requests to divar.ir are slow/blocked - point this at a proxy with a
+    # good path into Iran. Independent from TELEGRAM_PROXY_URL, which is for
+    # the opposite direction (reaching Telegram from inside Iran).
+    scraper_proxy_url: str = os.getenv("SCRAPER_PROXY_URL", "")
 
     # Divar categories included in every scan (fixed by product decision)
     divar_categories: list[str] = field(

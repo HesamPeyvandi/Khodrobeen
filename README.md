@@ -175,6 +175,33 @@ memory/timeout errors, increase `POLL_INTERVAL_SECONDS` and lower
 instead (the `app/services` and `app/scheduler` packages have no Flask
 dependency, so they're easy to split out).
 
+## Troubleshooting: listing detail pages keep timing out
+
+If `list_new_listings` finds listings fine but `get_listing_detail` keeps
+logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
+Divar's network path is bad or actively throttled from wherever you're
+hosting. Iranian sites are often behind a CDN/anti-bot layer (Arvan Cloud is
+common) that slow-walks or drops traffic that looks automated - and "loading
+dozens of detail pages back-to-back from one non-Iranian IP" looks exactly
+like a bot. Three settings in `.env` address this, roughly in order of
+how likely they are to actually fix it:
+
+1. `SCRAPER_PROXY_URL` - route the scraper's own browser traffic through a
+   proxy with a good path into Iran. This fixes the underlying network
+   problem rather than just waiting longer for a degraded connection, so
+   try this first if (2) and (3) don't help.
+2. `PAGE_TIMEOUT_MS` - raise this (e.g. to `90000`) if pages are loading,
+   just slowly.
+3. `PAGE_GOTO_RETRIES` - each page load is already retried this many times
+   with backoff before giving up; raising it trades speed for resilience.
+
+If scans are consistently slower than `POLL_INTERVAL_SECONDS`, you'll see
+`apscheduler` log warnings like `maximum number of running instances
+reached` - that's the built-in overlap guard working as intended, not a
+bug, but it does mean scans are falling behind. Fixing the timeout issue
+above should resolve it; as a stopgap you can also raise
+`POLL_INTERVAL_SECONDS` and lower `MAX_LISTINGS_PER_SCAN`.
+
 ## Selector maintenance
 
 Divar's `robots.txt` disallows automated crawlers, and both Divar's and
