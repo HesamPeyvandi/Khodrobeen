@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: divar-deal-finder
+    name: khodrobeen
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt && playwright install --with-deps chromium"

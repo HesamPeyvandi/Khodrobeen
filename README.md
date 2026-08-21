@@ -1,239 +1,245 @@
-# یابنده خودروی ارزنده (Divar Deal Finder)
+# Khodrobeen 🚗
 
-سیستمی که به‌صورت خودکار آگهی‌های خودرو/وانت دیوار را در شهرهای انتخابی هر
-کاربر رصد می‌کند، قیمت هر آگهی جدید را با تخمین «همراه مکانیک» مقایسه می‌کند،
-و اگر قیمت دیوار پایین‌تر از تخمین بود، لینک آگهی را از طریق ربات تلگرام
-برای کاربر ارسال می‌کند.
+**Khodrobeen** (خودروبین — "car-seer") is an automated deal-finder for used
+cars on [Divar](https://divar.ir), Iran's largest classifieds marketplace.
+It continuously monitors new car listings in cities you choose, gets each
+one appraised by [Hamrah Mechanic](https://www.hamrah-mechanic.com)'s price
+estimation tool, and pushes a Telegram notification the moment it finds a
+listing priced below its estimated market value.
 
-## معماری
+> Persian documentation: [README.fa.md](README.fa.md)
 
-```
-                        ┌────────────────────┐
-                        │   APScheduler       │   هر چند دقیقه یک‌بار
-                        │  (run_scan_cycle)    │──────────────┐
-                        └────────────────────┘               │
-                                   │                          ▼
-                     ┌─────────────┴───────────┐   ┌────────────────────┐
-                     │   Divar Scraper           │   │ Hamrah Mechanic     │
-                     │  (Playwright, app/services/│   │ Estimator           │
-                     │   divar_client.py)         │──▶│ (app/services/       │
-                     └─────────────┬───────────┘   │  price_estimator.py) │
-                                   │                └──────────┬─────────┘
-                                   ▼                           │
-                        ┌────────────────────┐                │
-                        │   deal_checker.py    │◀──────────────┘
-                        │  (compare & persist)  │
-                        └──────────┬───────────┘
-                                   ▼
-                        ┌────────────────────┐        ┌──────────────────┐
-                        │  SQLite / SQLAlchemy │        │   Telegram Bot    │
-                        │  (app/db)             │        │  (aiogram, app/bot)│
-                        └──────────┬───────────┘        └────────┬─────────┘
-                                   │                              ▲
-                                   ▼                              │
-                        ┌────────────────────┐                    │
-                        │   Flask Admin Panel   │────notify deal──┘
-                        │  (app/web)             │
-                        └────────────────────┘
-```
+---
 
-همه‌ی این‌ها در یک پروسه (`main.py`) اجرا می‌شوند: پنل وب روی یک ترد جدا،
-بات و زمان‌بند روی event loop اصلی asyncio.
-
-## ویژگی‌ها
-
-- انتخاب شهرهای موردنظر از داخل ربات تلگرام (کیبورد این‌لاین)
-- بررسی خودکار آگهی‌های تازه‌ی خودرو و وانت دیوار در آن شهرها
-- تخمین قیمت هر آگهی با فرم «همراه مکانیک» و مقایسه‌ی خودکار
-- ارسال آگهی‌های ارزان‌تر از تخمین به‌صورت خودکار در تلگرام
-- پنل مدیریت وب (فارسی، راست‌به‌چپ) برای دیدن آمار و فعال/غیرفعال‌سازی کاربران
-- ساختار اشتراک قابل توسعه: همین امروز فعال‌سازی دستی، بعداً اتصال درگاه واقعی
-  فقط با اضافه کردن یک کلاس تازه در `app/services/payment/`
-
-## عیب‌یابی: خطای اتصال به تلگرام هنگام اجرای محلی
-
-اگه موقع اجرای `python main.py` این خطا رو دیدید:
+## How it works
 
 ```
-aiogram.exceptions.TelegramNetworkError: ... Cannot connect to host api.telegram.org
+   APScheduler (scan cycle, every N minutes)
+        │
+        ▼
+   Divar scraper (Playwright) ──► Hamrah Mechanic price estimator (Playwright)
+        │                                        │
+        └───────────────► Deal checker ◄─────────┘
+                        (compare & persist)
+                                │
+                                ▼
+                    SQLite / SQLAlchemy
+                                │
+                 ┌──────────────┴──────────────┐
+                 ▼                              ▼
+         Flask admin panel              Telegram bot (aiogram)
+        (stats, user management)     (city picker, deal alerts)
 ```
 
-این یک باگ کد نیست - یعنی از سیستم شما به سرورهای تلگرام دسترسی نیست (تلگرام
-در ایران فیلتر است). دو راه‌حل:
+Everything runs as a single process (`main.py`): the admin panel runs on a
+background thread, while the Telegram bot and scheduler share the main
+asyncio event loop. This lets the whole stack fit on one small/free web
+service instance.
 
-1. **روی سروری خارج از ایران دیپلوی کنید** (مثلاً Render، طبق راهنمای بالا) -
-   از اونجا این مشکل اصلاً پیش نمی‌آد چون سرور مستقیم به تلگرام دسترسی داره.
-2. **برای تست محلی**، یا VPN سیستمی‌تون رو روشن کنید، یا آدرس پراکسی محلی‌تون
-   رو در `.env` بدید:
-   ```
-   TELEGRAM_PROXY_URL=http://127.0.0.1:2080
-   ```
-   (هم `http://` و هم `socks5://` پشتیبانی می‌شه - آدرس و پورت دقیق رو از
-   تنظیمات کلاینت VPN/فیلترشکن خودتون بگیرید). وقتی این مقدار خالی باشه
-   (پیش‌فرض)، برنامه بدون هیچ پراکسی‌ای مستقیم وصل می‌شه - دقیقاً همون چیزی
-   که روی سرورهای خارج از ایران لازم است.
+## Features
 
-## پیش‌نیازها
+- 🏙 **Per-user city selection** via inline Telegram keyboards — no need to
+  edit config files to change what's being watched
+- 🔍 **Automated Divar scraping** for new car/pickup listings in every
+  watched city, with a global de-duplication table so nothing is processed
+  twice
+- 💰 **Automatic price appraisal** against Hamrah Mechanic's estimation
+  tool, including a proper mapping from Divar's ten standardized
+  body-condition categories to Hamrah Mechanic's per-part checkboxes
+- 📲 **Instant Telegram alerts** whenever a listing's asking price is below
+  its estimated value, with the listing link, price, and estimate attached
+- 🖥 **Right-to-left Persian admin panel** (Flask) for viewing stats and
+  managing subscribers
+- 💳 **Extensible subscription system** — manual activation today, wired
+  through a `PaymentProvider` interface so a real gateway (e.g. Zarinpal)
+  can be added later without touching the bot, the panel, or the database
+  models
+- 🌐 **Optional proxy support** for the Telegram connection, since
+  `api.telegram.org` is filtered inside Iran but a server deployed outside
+  Iran (e.g. Render) needs none of this
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Scraping / browser automation | [Playwright](https://playwright.dev) (Chromium, headless) |
+| Telegram bot | [aiogram](https://docs.aiogram.dev) 3.x |
+| Admin panel | [Flask](https://flask.palletsprojects.com) + Jinja2 |
+| Database | SQLite via [SQLAlchemy](https://www.sqlalchemy.org) 2.x (swap `DATABASE_URL` for Postgres at scale) |
+| Scheduling | [APScheduler](https://apscheduler.readthedocs.io) |
+| Production server | [Waitress](https://docs.pylonsproject.org/projects/waitress/) |
+
+## Project structure
+
+```
+app/
+  config.py              Environment-driven settings (.env)
+  db/                     SQLAlchemy models & session
+  services/
+    divar_client.py        Divar scraper (Playwright)
+    price_estimator.py     Hamrah Mechanic form automation (Playwright)
+    deal_checker.py         Price comparison logic
+    notifier.py              Telegram message formatting/sending
+    subscription.py          User & subscription business logic
+    payment/                 Pluggable payment-provider interface
+  bot/                    Telegram bot (aiogram) — handlers & keyboards
+  web/                    Admin panel (Flask) — routes & templates
+  scheduler/              Periodic scan job (APScheduler)
+  constants/cities.py     Divar city slug ↔ Persian name mapping
+main.py                  Entry point — runs everything together
+```
+
+## Getting started
+
+### Prerequisites
 
 - Python 3.11+
-- یک بات تلگرام ساخته‌شده با [@BotFather](https://t.me/BotFather) (توکن آن را نگه دارید)
-- شناسه‌ی عددی تلگرام خودتان (برای دریافت دسترسی ادمین) - آن را از باتی مثل
-  [@userinfobot](https://t.me/userinfobot) بگیرید
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Your numeric Telegram user ID (for admin access) — get it from
+  [@userinfobot](https://t.me/userinfobot)
 
-## نصب و اجرای محلی
+### Local setup
 
 ```bash
-git clone <this-repo>
-cd divar-deal-finder
+git clone https://github.com/<your-username>/khodrobeen.git
+cd khodrobeen
 
 python -m venv .venv
-source .venv/bin/activate   # ویندوز: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 pip install -r requirements.txt
-playwright install --with-deps chromium
+playwright install chromium
 
 cp .env.example .env
-# سپس .env را باز کنید و مقادیر را پر کنید (پایین‌تر توضیح داده شده)
+# edit .env with your values — see Configuration below
 ```
 
-### تولید هش رمز عبور پنل ادمین
+Generate the admin panel's password hash:
 
 ```bash
 python -c "from app.web.auth import hash_password; print(hash_password('your-password'))"
 ```
+Paste the output into `ADMIN_PANEL_PASSWORD_HASH` in `.env`.
 
-خروجی را در `ADMIN_PANEL_PASSWORD_HASH` داخل `.env` قرار دهید.
-
-### اجرا
+Run it:
 
 ```bash
 python main.py
 ```
 
-- بات تلگرام: با `/start` در تلگرام شروع کنید
-- پنل ادمین: `http://localhost:8000`
-- health check برای UptimeRobot: `http://localhost:8000/health`
+- Telegram bot: send `/start` to your bot
+- Admin panel: `http://localhost:8000`
+- Health check (for uptime monitoring): `http://localhost:8000/health`
 
-## دیپلوی روی Render (پلن رایگان)
+### Configuration
 
-فایل `render.yaml` آماده است. مراحل:
+All settings live in `.env` (see `.env.example` for the full list with
+comments). The most important ones:
 
-1. ریپو را به گیت‌هاب پوش کنید و در Render یک "Blueprint" جدید از روی آن بسازید.
-2. متغیرهای محیطی با `sync: false` (توکن بات، شناسه ادمین، هش رمز عبور) را
-   در پنل Render دستی وارد کنید.
-3. بعد از دیپلوی موفق، آدرس سرویس را بردارید و در
-   [UptimeRobot](https://uptimerobot.com) یک مانیتور HTTP روی
-   `https://<your-app>.onrender.com/health` با فاصله‌ی هر ۵ دقیقه بسازید تا
-   سرویس رایگان Render نخوابد.
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Your bot's token from BotFather |
+| `ADMIN_TELEGRAM_IDS` | Comma-separated Telegram user IDs with admin access |
+| `DATABASE_URL` | SQLAlchemy connection string (defaults to local SQLite) |
+| `ADMIN_PANEL_PASSWORD_HASH` | Hash generated as shown above |
+| `POLL_INTERVAL_SECONDS` | How often to scan Divar (default: 180) |
+| `TELEGRAM_PROXY_URL` | Optional — only needed for local dev inside Iran, where Telegram is filtered |
+| `PAYMENT_PROVIDER` | `manual` by default; see [Adding a real payment gateway](#adding-a-real-payment-gateway) |
 
-### ⚠️ محدودیت مهم پلن رایگان Render: دیتابیس پایدار نیست
+## Deploying to Render (free tier)
 
-پلن رایگان Render دیسک پایدار (persistent disk) ندارد؛ یعنی فایل SQLite با
-هر ری‌استارت/دیپلوی جدید پاک می‌شود و لیست کاربران و آگهی‌های دیده‌شده از
-اول شروع می‌شود. برای استفاده‌ی واقعی (نه فقط تست/دمو) یکی از این‌ها را
-انتخاب کنید:
+A ready-to-use `render.yaml` blueprint is included.
 
-- یک دیتابیس Postgres رایگان بیرونی (مثلاً [Neon](https://neon.tech) یا
-  [Supabase](https://supabase.com)) بگیرید و `DATABASE_URL` را به آن آدرس
-  بدهید (نیاز به `pip install psycopg2-binary` هم دارد).
-- یا پلن Starter‌ی رندر را با دیسک پایدار بگیرید.
+1. Push this repo to GitHub.
+2. In Render, create a new **Blueprint** from the repo.
+3. Fill in the environment variables marked `sync: false` in the Render UI
+   (bot token, admin IDs, password hash).
+4. Once live, add an [UptimeRobot](https://uptimerobot.com) HTTP monitor on
+   `https://<your-app>.onrender.com/health` (5-minute interval) to keep the
+   free instance awake.
 
-هیچ‌کدام از این‌ها نیاز به تغییر کد ندارد چون از SQLAlchemy استفاده شده.
+### ⚠️ Free tier has no persistent disk
 
-### ⚠️ منابع محدود پلن رایگان و Playwright
+Render's free plan doesn't persist disk storage across deploys/restarts, so
+a local SQLite file will be wiped on every redeploy. For anything beyond a
+demo, point `DATABASE_URL` at a free external Postgres instance (e.g.
+[Neon](https://neon.tech) or [Supabase](https://supabase.com)) — no code
+changes needed, just install `psycopg2-binary` and update the URL.
 
-اجرای مرورگر Headless (برای اسکرپینگ دیوار و پر کردن فرم همراه مکانیک) به
-RAM بیشتری نسبت به یک سرویس وب معمولی نیاز دارد. پلن رایگان Render (512MB)
-ممکن است برای این کار کند یا ناپایدار باشد - این ریسکی است که در ابتدای
-پروژه با هم روی آن توافق کردیم. اگر با خطاهای حافظه یا timeout مواجه شدید:
+### ⚠️ Headless browser memory usage
 
-- `MAX_LISTINGS_PER_SCAN` و `POLL_INTERVAL_SECONDS` را در `.env` بزرگ‌تر کنید
-  تا فشار کمتری بیاید.
-- یا فقط بخش اسکرپینگ/زمان‌بند را روی یک VPS ارزان اجرا کنید و پنل/بات را
-  همان‌جا نگه دارید (کد به همین شکل قابل تفکیک نوشته شده - `app/services` و
-  `app/scheduler` هیچ وابستگی‌ای به Flask ندارند).
+Playwright's Chromium needs more RAM than a typical small web service.
+Render's free 512MB tier may be slow or unstable under load. If you hit
+memory/timeout errors, increase `POLL_INTERVAL_SECONDS` and lower
+`MAX_LISTINGS_PER_SCAN`, or run the scraper/scheduler on a small VPS
+instead (the `app/services` and `app/scheduler` packages have no Flask
+dependency, so they're easy to split out).
 
-## تنظیم/نگه‌داری سلکتورهای اسکرپینگ
+## Selector maintenance
 
-دیوار `robots.txt` را طوری تنظیم کرده که دسترسی خودکار را غیرمجاز اعلام
-می‌کند و ساختار HTML صفحاتش هم به‌مرور تغییر می‌کند؛ به همین دلیل دو فایل
-زیر تمام سلکتورهای CSS را در یک دیکشنری بالای فایل نگه می‌دارند تا در صورت
-نیاز فقط همان‌جا را ویرایش کنید، نه کل منطق را:
+Divar's `robots.txt` disallows automated crawlers, and both Divar's and
+Hamrah Mechanic's frontend markup change over time. Every CSS/DOM selector
+used for scraping lives in one `SELECTORS` dictionary at the top of each
+file, so updates never require touching the surrounding logic:
 
-- `app/services/divar_client.py` → دیکشنری `SELECTORS`
-- `app/services/price_estimator.py` → دیکشنری `SELECTORS` (این یکی از روی
-  بازرسی مستقیم صفحه‌ی واقعی همراه مکانیک نوشته شده و آماده‌ی استفاده است.
-  چون سایت با Next.js/CSS-Modules ساخته شده، اکثر سلکتورها به‌جای کلاس کامل
-  از `[class*="..."]` روی بخش پایدارِ قبل از هش استفاده می‌کنند تا با هر
-  بیلد جدید سایت خراب نشوند. یک محدودیت شناخته‌شده دارد: تشخیص خودکار اینکه
-  کدام قطعه‌ی خودرو باید در تب «رنگ‌شدگی» در برابر «تعویض‌شدگی» تیک بخورد،
-  فقط بر اساس چند کلمه‌کلیدی ساده است - جزئیات در docstring بالای همان فایل)
+- `app/services/divar_client.py`
+- `app/services/price_estimator.py` — also see `DIVAR_BODY_STATUS_MAP`,
+  which maps Divar's ten standardized body-condition categories (e.g.
+  "رنگ‌شدگی، در ۲ ناحیه") to Hamrah Mechanic's per-part checkboxes
 
-نحوه‌ی به‌روزرسانی یک سلکتور: صفحه‌ی موردنظر را در کروم باز کنید، روی عنصر
-راست‌کلیک → Inspect، و یک سلکتور پایدار (id، `name`، `role`، یا پیشوند کلاس
-قبل از هش) پیدا کنید.
+Because Hamrah Mechanic is a Next.js app using CSS Modules, most class
+names look like `detailRow_car-detail__car-name__fhOg7` — the `__fhOg7`
+suffix is a build hash that changes on every deploy, while the prefix
+before it stays stable. Selectors use `[class*="..."]` on that stable
+prefix instead of matching the full class, so they survive future
+rebuilds. If scraping starts failing, open the page in Chrome DevTools,
+inspect the element in question, and update the relevant entry.
 
-همچنین به یاد داشته باشید نرخ درخواست (`REQUEST_DELAY_SECONDS`) را پایین
-نگه دارید تا احتمال بلاک‌شدن IP کم شود؛ این یک ابزار شخصی برای رصد قیمت
-است، نه یک خزنده‌ی تجاری.
+Please also keep `REQUEST_DELAY_SECONDS` reasonable — this project is
+meant for personal, low-volume monitoring, not high-throughput crawling.
 
-## دستورات ادمین در تلگرام
-
-```
-/admin_users                       لیست همه‌ی کاربران
-/admin_activate <telegram_id> <days>   فعال/تمدید اشتراک کاربر
-/admin_disable <telegram_id>       غیرفعال کردن کاربر
-/admin_enable <telegram_id>        فعال کردن دوباره‌ی کاربر
-```
-
-(همین کارها از پنل وب هم قابل انجام است.)
-
-## افزودن درگاه پرداخت واقعی
-
-معماری از اول برای این آماده شده:
-
-1. یک کلاس تازه در `app/services/payment/` بسازید که از
-   `PaymentProvider` (در `base.py`) ارث ببرد - مثلاً `ZarinpalPaymentProvider`.
-2. در `app/services/payment/__init__.py`، شاخه‌ی جدید را به `get_payment_provider`
-   اضافه کنید.
-3. `PAYMENT_PROVIDER=zarinpal` را در `.env` تنظیم کنید.
-
-هیچ‌کدام از بات، پنل وب یا مدل‌های دیتابیس نیازی به تغییر ندارند، چون همه
-از طریق `activate_subscription` در `app/services/subscription.py` کار
-می‌کنند.
-
-## ساختار پوشه‌ها
+## Admin commands (Telegram)
 
 ```
-app/
-  config.py              تنظیمات (از متغیرهای محیطی خوانده می‌شود)
-  db/                     مدل‌ها و session دیتابیس (SQLAlchemy)
-  services/
-    divar_client.py       اسکرپینگ دیوار (Playwright)
-    price_estimator.py    اتوماسیون فرم همراه مکانیک (Playwright)
-    deal_checker.py        منطق مقایسه‌ی قیمت
-    notifier.py            ساخت و ارسال پیام تلگرام
-    subscription.py         منطق اشتراک/کاربر
-    payment/                رابط قابل‌توسعه‌ی پرداخت
-  bot/                    ربات تلگرام (aiogram) - هندلرها و کیبوردها
-  web/                    پنل مدیریت (Flask) - روت‌ها و قالب‌ها
-  scheduler/              زمان‌بند اسکن دوره‌ای (APScheduler)
-  constants/cities.py     نگاشت شهرها به اسلاگ دیوار
-main.py                  نقطه‌ی ورود - همه چیز را با هم اجرا می‌کند
+/admin_users                            List all users
+/admin_activate <telegram_id> <days>    Activate/extend a subscription
+/admin_disable <telegram_id>            Disable a user
+/admin_enable <telegram_id>             Re-enable a user
 ```
 
-## محدودیت‌های شناخته‌شده (برای گزارش پروژه دانشگاهی هم مفید است)
+The same actions are also available from the web admin panel.
 
-- دیوار API عمومی برای خواندن آگهی‌ها ندارد؛ این پروژه از اسکرپینگ صفحات
-  عمومی استفاده می‌کند که در تضاد با `robots.txt` دیوار است. برای استفاده‌ی
-  شخصی و با نرخ درخواست پایین طراحی شده، نه برای مقیاس تجاری.
-- سلکتورهای صفحه‌ی همراه مکانیک از روی بازرسی مستقیم صفحه‌ی واقعی نوشته
-  شدن و آماده‌ی استفاده‌ان. تنها محدودیت شناخته‌شده: تشخیص اینکه کدام قطعه‌ی
-  بدنه باید در تب «رنگ‌شدگی» در برابر «تعویض‌شدگی» تیک بخورد، فقط با چند
-  کلمه‌کلیدی ساده انجام می‌شود (`KNOWN_BODY_PARTS` در همان فایل) و ممکنه
-  برای عبارت‌های پیچیده‌تر دیوار دقیق نباشه.
-- تشخیص برند/مدل از روی متن آگهی دیوار به‌صورت best-effort انجام می‌شود
-  (`app/services/deal_checker.py::_split_brand_model`) و ممکن است برای
-  برخی خودروها نیاز به بهبود داشته باشد.
-- دیتابیس SQLite برای یک استقرار کوچک مناسب است؛ برای مقیاس بزرگ‌تر به
-  Postgres مهاجرت کنید (فقط تغییر `DATABASE_URL`).
+## Adding a real payment gateway
+
+The subscription system is built around a `PaymentProvider` interface so a
+real gateway can be dropped in without touching the bot, the web panel, or
+the database models:
+
+1. Create a new class in `app/services/payment/` that implements
+   `PaymentProvider` (see `base.py`) — e.g. `ZarinpalPaymentProvider`.
+2. Register it in `get_payment_provider()` in
+   `app/services/payment/__init__.py`.
+3. Set `PAYMENT_PROVIDER=zarinpal` in `.env`.
+
+Everything downstream goes through `activate_subscription()` in
+`app/services/subscription.py`, so that's the only choke point that needs
+to stay correct.
+
+## Known limitations
+
+- Divar has no public API for reading listings; this project scrapes
+  public pages, which is against Divar's `robots.txt`. It's built for
+  personal use at a low request rate, not commercial-scale crawling.
+- Brand/model splitting from Divar's combined text field
+  (`deal_checker.py::_split_brand_model`) is best-effort and may need
+  refinement for less common car names.
+- Mapping Divar's body-condition category to *which* specific panels were
+  painted/replaced on Hamrah Mechanic's form is necessarily approximate,
+  since Divar only reports how extensive the damage is, not which panels.
+- SQLite is fine for a small deployment; migrate to Postgres for anything
+  larger (just change `DATABASE_URL`).
+
+## License
+
+No license has been chosen yet — all rights reserved by default until one
+is added.
