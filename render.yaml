@@ -6,6 +6,8 @@ services:
     buildCommand: "pip install -r requirements.txt && playwright install chromium"
     startCommand: "python main.py"
     envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
       - key: PYTHON_VERSION
         value: "3.11.9"
       - key: TELEGRAM_BOT_TOKEN
