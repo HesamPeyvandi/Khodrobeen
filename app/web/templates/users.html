@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}کاربران{% endblock %}
+{% block content %}
+<h1 class="page-title">کاربران</h1>
+
+<div class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>شناسه تلگرام</th>
+        <th>یوزرنیم</th>
+        <th>وضعیت</th>
+        <th>انقضا</th>
+        <th>شهرها</th>
+        <th>عملیات</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.telegram_user_id }}</td>
+        <td>{{ "@" + u.telegram_username if u.telegram_username else "-" }}</td>
+        <td>
+          <span class="badge {{ 'badge-active' if u.is_active else 'badge-inactive' }}">
+            {{ u.status }}
+          </span>
+        </td>
+        <td>{{ u.expires_at.strftime("%Y-%m-%d") if u.expires_at else "نامحدود" }}</td>
+        <td>{{ u.cities }}</td>
+        <td class="actions">
+          <form method="post" action="{{ url_for('users.activate', user_id=u.id) }}" class="inline-form">
+            <input type="number" name="days" value="30" min="1" class="days-input">
+            <button type="submit" class="btn btn-small btn-primary">تمدید/فعال‌سازی</button>
+          </form>
+          {% if u.is_active %}
+          <form method="post" action="{{ url_for('users.disable', user_id=u.id) }}" class="inline-form">
+            <button type="submit" class="btn btn-small btn-danger">غیرفعال کردن</button>
+          </form>
+          {% else %}
+          <form method="post" action="{{ url_for('users.enable', user_id=u.id) }}" class="inline-form">
+            <button type="submit" class="btn btn-small btn-secondary">فعال کردن</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty-row">هنوز کاربری ثبت نشده.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

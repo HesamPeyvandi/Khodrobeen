@@ -1,0 +1,137 @@
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f232c;
+  --border: #2a2e38;
+  --text: #e8eaed;
+  --text-muted: #9aa0ac;
+  --primary: #3fb27f;
+  --primary-hover: #37a072;
+  --danger: #e0575b;
+  --danger-hover: #cc4d51;
+  --warning: #e0a84b;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Vazirmatn", Tahoma, sans-serif;
+  line-height: 1.7;
+}
+
+.container {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* Navbar */
+.navbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.navbar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+}
+.brand {
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 1.05rem;
+}
+.nav-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  margin-inline-start: 20px;
+  transition: color .15s;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-links .logout { color: var(--danger); }
+
+/* Layout */
+main.container { padding-top: 32px; padding-bottom: 60px; }
+.page-title { font-size: 1.6rem; margin-bottom: 24px; }
+.section-title { font-size: 1.15rem; margin: 32px 0 16px; color: var(--text-muted); }
+
+/* Cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+}
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.stat-card.highlight { border-color: var(--primary); }
+.stat-value { font-size: 1.9rem; font-weight: 700; }
+.stat-label { color: var(--text-muted); font-size: .9rem; }
+
+/* Table */
+.table-card { padding: 0; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 640px; }
+th, td { padding: 14px 16px; text-align: right; border-bottom: 1px solid var(--border); font-size: .92rem; }
+th { color: var(--text-muted); font-weight: 600; background: var(--surface-2); }
+tr:last-child td { border-bottom: none; }
+.empty-row { text-align: center; color: var(--text-muted); padding: 32px; }
+
+.badge { padding: 4px 10px; border-radius: 999px; font-size: .78rem; }
+.badge-active { background: rgba(63, 178, 127, .15); color: var(--primary); }
+.badge-inactive { background: rgba(224, 87, 91, .15); color: var(--danger); }
+
+/* Forms & buttons */
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.inline-form { display: inline-flex; align-items: center; gap: 6px; }
+.days-input { width: 60px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-family: inherit;
+  cursor: pointer;
+  font-size: .92rem;
+  transition: background .15s;
+}
+.btn-small { padding: 6px 12px; font-size: .82rem; }
+.btn-primary { background: var(--primary); color: #08130e; font-weight: 600; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+.btn-danger { background: var(--danger); color: #180404; font-weight: 600; }
+.btn-danger:hover { background: var(--danger-hover); }
+
+/* Login page */
+.login-wrapper { display: flex; justify-content: center; padding-top: 80px; }
+.login-card { width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 16px; }
+.login-card h1 { font-size: 1.2rem; margin: 0 0 8px; text-align: center; }
+.login-card label { display: flex; flex-direction: column; gap: 6px; font-size: .88rem; color: var(--text-muted); }
+.login-card input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: .95rem;
+}
+
+/* Flash messages */
+.flash-stack { margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px; }
+.flash { padding: 12px 16px; border-radius: 8px; font-size: .9rem; }
+.flash-success { background: rgba(63, 178, 127, .12); color: var(--primary); }
+.flash-error { background: rgba(224, 87, 91, .12); color: var(--danger); }

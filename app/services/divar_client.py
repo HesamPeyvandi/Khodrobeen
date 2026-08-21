@@ -1,0 +1,210 @@
+"""Divar scraping adapter.
+
+Divar has no public API for reading third-party listings (their "Kenar"
+platform is for posting/managing your own ads and chat-bots, not for
+searching other users' ads), and https://divar.ir/robots.txt disallows
+automated crawlers. This module talks to the public pages anyway, at a low
+request rate, for personal/non-commercial monitoring - use it responsibly:
+keep REQUEST_DELAY_SECONDS reasonable and don't run many parallel instances.
+
+IMPORTANT - SELECTORS WILL NEED MAINTENANCE.
+Divar's frontend markup changes periodically. All CSS selectors used to
+read listing cards and detail pages live in the SELECTORS dict below. If
+scraping starts returning empty results, open the affected page in a real
+browser, use "Inspect element" on the relevant piece of data, and update
+the matching selector here - the rest of the codebase never needs to change.
+"""
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+
+from playwright.async_api import Browser, Page, async_playwright
+
+from app.config import settings
+from app.services.text_utils import clean_whitespace, extract_number
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://divar.ir"
+
+# Edit these if Divar changes its markup.
+SELECTORS = {
+    # Search results page (https://divar.ir/s/<city>/<category>)
+    "listing_card_link": "article a[href*='/v/']",
+    # Listing detail page (https://divar.ir/v/<slug>/<token>)
+    "detail_title": "h1",
+    "detail_price": "[class*='kt-unexpandable-row'] :text('تومان')",
+    # Spec rows are typically label/value pairs; we scan all rows and match
+    # by the Persian label text rather than a fragile class name.
+    "detail_spec_rows": "[class*='kt-base-row'], [class*='kt-unexpandable-row']",
+    "detail_spec_label": "[class*='title'], [class*='kt-base-row__title'], p",
+    "detail_spec_value": "[class*='value'], [class*='kt-base-row__value'], p",
+}
+
+SPEC_LABELS = {
+    "brand_model": ("خودرو", "برند", "مدل"),
+    "year": ("سال ساخت", "سال"),
+    "mileage": ("کارکرد",),
+    "color": ("رنگ",),
+    "body_status": ("وضعیت بدنه",),
+    "gearbox": ("گیربکس",),
+}
+
+
+@dataclass
+class ListingSummary:
+    token: str
+    url: str
+    title: str
+
+
+@dataclass
+class ListingDetail:
+    token: str
+    url: str
+    title: str
+    price_toman: float | None
+    brand_model: str | None = None
+    year: str | None = None
+    mileage_km: float | None = None
+    color: str | None = None
+    body_status: str | None = None
+    gearbox: str | None = None
+    raw_specs: dict[str, str] = field(default_factory=dict)
+
+
+def _token_from_url(url: str) -> str:
+    # Divar detail URLs look like https://divar.ir/v/<slug>/<token>
+    return url.rstrip("/").rsplit("/", 1)[-1]
+
+
+class DivarScraper:
+    def __init__(self) -> None:
+        self._playwright = None
+        self._browser: Browser | None = None
+
+    async def __aenter__(self) -> "DivarScraper":
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
+            headless=settings.headless_browser
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
+
+    async def _new_page(self) -> Page:
+        assert self._browser is not None
+        context = await self._browser.new_context(
+            locale="fa-IR",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            ),
+        )
+        return await context.new_page()
+
+    async def list_new_listings(
+        self, city_slug: str, category_slug: str, limit: int | None = None
+    ) -> list[ListingSummary]:
+        limit = limit or settings.max_listings_per_scan
+        url = f"{BASE_URL}/s/{city_slug}/{category_slug}"
+        page = await self._new_page()
+        summaries: list[ListingSummary] = []
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(1500)  # let client-side rendering settle
+            links = await page.locator(SELECTORS["listing_card_link"]).all()
+            seen_urls: set[str] = set()
+            for link in links:
+                href = await link.get_attribute("href")
+                if not href:
+                    continue
+                full_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+                if full_url in seen_urls:
+                    continue
+                seen_urls.add(full_url)
+
+                title_text = clean_whitespace(await link.inner_text())
+                summaries.append(
+                    ListingSummary(
+                        token=_token_from_url(full_url),
+                        url=full_url,
+                        title=title_text,
+                    )
+                )
+                if len(summaries) >= limit:
+                    break
+        except Exception:
+            logger.exception("Failed to list Divar listings for %s/%s", city_slug, category_slug)
+        finally:
+            await page.close()
+
+        await asyncio.sleep(settings.request_delay_seconds)
+        return summaries
+
+    async def get_listing_detail(self, url: str) -> ListingDetail | None:
+        page = await self._new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(1200)
+
+            title = clean_whitespace(
+                await page.locator(SELECTORS["detail_title"]).first.inner_text()
+            ) if await page.locator(SELECTORS["detail_title"]).count() else ""
+
+            price_text = ""
+            if await page.locator(SELECTORS["detail_price"]).count():
+                price_text = await page.locator(SELECTORS["detail_price"]).first.inner_text()
+            price_toman = extract_number(price_text)
+
+            raw_specs: dict[str, str] = {}
+            rows = await page.locator(SELECTORS["detail_spec_rows"]).all()
+            for row in rows:
+                try:
+                    label = clean_whitespace(
+                        await row.locator(SELECTORS["detail_spec_label"]).first.inner_text()
+                    )
+                    value = clean_whitespace(
+                        await row.locator(SELECTORS["detail_spec_value"]).last.inner_text()
+                    )
+                except Exception:
+                    continue
+                if label and value and label != value:
+                    raw_specs[label] = value
+
+            detail = ListingDetail(
+                token=_token_from_url(url),
+                url=url,
+                title=title,
+                price_toman=price_toman,
+                raw_specs=raw_specs,
+            )
+            _fill_known_specs(detail, raw_specs)
+            return detail
+        except Exception:
+            logger.exception("Failed to read Divar listing detail: %s", url)
+            return None
+        finally:
+            await page.close()
+            await asyncio.sleep(settings.request_delay_seconds)
+
+
+def _fill_known_specs(detail: ListingDetail, raw_specs: dict[str, str]) -> None:
+    def find(*labels: str) -> str | None:
+        for label, value in raw_specs.items():
+            if any(target in label for target in labels):
+                return value
+        return None
+
+    detail.brand_model = find(*SPEC_LABELS["brand_model"])
+    detail.year = find(*SPEC_LABELS["year"])
+    detail.color = find(*SPEC_LABELS["color"])
+    detail.body_status = find(*SPEC_LABELS["body_status"])
+    detail.gearbox = find(*SPEC_LABELS["gearbox"])
+    mileage_text = find(*SPEC_LABELS["mileage"])
+    detail.mileage_km = extract_number(mileage_text)

@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: divar-deal-finder
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt && playwright install --with-deps chromium"
+    startCommand: "python main.py"
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: ADMIN_PANEL_USERNAME
+        value: admin
+      - key: ADMIN_PANEL_PASSWORD_HASH
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:///./data/app.db
+      - key: POLL_INTERVAL_SECONDS
+        value: "180"
+      - key: HEADLESS_BROWSER
+        value: "true"
+      - key: PAYMENT_PROVIDER
+        value: manual

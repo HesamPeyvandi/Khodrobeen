@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}داشبورد{% endblock %}
+{% block content %}
+<h1 class="page-title">داشبورد</h1>
+
+<div class="stat-grid">
+  <div class="card stat-card">
+    <span class="stat-value">{{ total_users }}</span>
+    <span class="stat-label">کل کاربران</span>
+  </div>
+  <div class="card stat-card">
+    <span class="stat-value">{{ active_users }}</span>
+    <span class="stat-label">کاربران فعال</span>
+  </div>
+  <div class="card stat-card">
+    <span class="stat-value">{{ trial_users }}</span>
+    <span class="stat-label">در دوره آزمایشی</span>
+  </div>
+  <div class="card stat-card">
+    <span class="stat-value">{{ scanned_today }}</span>
+    <span class="stat-label">آگهی بررسی‌شده (۲۴ساعت)</span>
+  </div>
+  <div class="card stat-card highlight">
+    <span class="stat-value">{{ deals_today }}</span>
+    <span class="stat-label">معامله‌ی ارزنده (۲۴ساعت)</span>
+  </div>
+</div>
+
+<h2 class="section-title">آخرین معاملات ارزنده</h2>
+<div class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>عنوان آگهی</th>
+        <th>شهر</th>
+        <th>قیمت دیوار</th>
+        <th>تخمین همراه مکانیک</th>
+        <th>زمان</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for deal in recent_deals %}
+      <tr>
+        <td>{{ deal.title or "-" }}</td>
+        <td>{{ deal.city_slug }}</td>
+        <td>{{ "{:,.0f}".format(deal.divar_price_toman) if deal.divar_price_toman else "-" }}</td>
+        <td>{{ "{:,.0f}".format(deal.estimated_price_toman) if deal.estimated_price_toman else "-" }}</td>
+        <td>{{ deal.first_seen_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        <td><a href="{{ deal.url }}" target="_blank" rel="noopener">مشاهده</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty-row">هنوز معامله‌ی ارزنده‌ای ثبت نشده.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
