@@ -15,6 +15,7 @@ engine = create_engine(
     connect_args={"check_same_thread": False}
     if settings.database_url.startswith("sqlite")
     else {},
+    pool_pre_ping=True,  # transparently reconnect if the DB dropped an idle connection
     future=True,
 )
 

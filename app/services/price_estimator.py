@@ -150,9 +150,10 @@ class HamrahMechanicEstimator:
 
     async def __aenter__(self) -> "HamrahMechanicEstimator":
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=settings.headless_browser
-        )
+        launch_kwargs: dict = {"headless": settings.headless_browser}
+        if settings.scraper_proxy_url:
+            launch_kwargs["proxy"] = {"server": settings.scraper_proxy_url}
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -176,7 +177,7 @@ class HamrahMechanicEstimator:
         context = await self._browser.new_context(locale="fa-IR")
         page = await context.new_page()
         try:
-            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=settings.page_timeout_ms)
             await page.wait_for_timeout(1500)  # let the React app hydrate
 
             await self._select_car(page, spec)

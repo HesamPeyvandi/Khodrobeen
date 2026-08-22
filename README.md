@@ -158,13 +158,31 @@ A ready-to-use `render.yaml` blueprint is included.
    `https://<your-app>.onrender.com/health` (5-minute interval) to keep the
    free instance awake.
 
-### ⚠️ Free tier has no persistent disk
+### ⚠️ Free tier has no persistent disk — set up free Postgres (Neon)
 
 Render's free plan doesn't persist disk storage across deploys/restarts, so
-a local SQLite file will be wiped on every redeploy. For anything beyond a
-demo, point `DATABASE_URL` at a free external Postgres instance (e.g.
-[Neon](https://neon.tech) or [Supabase](https://supabase.com)) — no code
-changes needed, just install `psycopg2-binary` and update the URL.
+a local SQLite file gets wiped every time you redeploy — including all
+registered bot users and their city selections. `psycopg2-binary` is
+already in `requirements.txt`, so switching to Postgres is just a
+`DATABASE_URL` change:
+
+1. Go to [neon.tech](https://neon.tech) and sign up for a free account.
+2. Create a new project (any name/region is fine — pick a region close to
+   your Render service if given a choice).
+3. On the project dashboard, find the **connection string** — it looks
+   like `postgresql://user:password@ep-xxx.region.aws.neon.tech/dbname?sslmode=require`.
+   Copy it.
+4. In Render, open your service → **Environment** → edit `DATABASE_URL` →
+   paste the Neon connection string → save. Render will redeploy
+   automatically.
+5. That's it — no code or schema changes needed. `init_db()` creates all
+   tables automatically on first startup against the new database.
+
+Neon's free tier auto-suspends the database after a period of inactivity
+and resumes it on the next connection (this project's DB engine already
+sets `pool_pre_ping=True` so it reconnects transparently instead of
+erroring on a stale connection) — the only visible effect is the first
+query after a period of silence being a bit slower while it wakes up.
 
 ### ⚠️ Headless browser memory usage
 

@@ -17,7 +17,11 @@ services:
       - key: ADMIN_PANEL_PASSWORD_HASH
         sync: false
       - key: DATABASE_URL
-        value: sqlite:///./data/app.db
+        sync: false
+        # Defaults to local SQLite if left unset in the Render dashboard.
+        # Render's free plan has no persistent disk, so SQLite gets wiped on
+        # every redeploy - set this to a free Neon Postgres connection
+        # string instead (see README's "Deploying to Render" section).
       - key: POLL_INTERVAL_SECONDS
         value: "180"
       - key: HEADLESS_BROWSER
