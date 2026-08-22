@@ -77,9 +77,18 @@ class WatchedCity(Base):
     user: Mapped["User"] = relationship(back_populates="watched_cities")
 
 
+class ListingStatus(str, enum.Enum):
+    OK = "ok"
+    SCRAPE_FAILED = "scrape_failed"
+    ESTIMATE_FAILED = "estimate_failed"
+    SKIPPED = "skipped"
+
+
 class SeenListing(Base):
     """Global de-duplication table: once a Divar listing token has been
-    processed, we never re-fetch its price estimate or re-notify about it.
+    processed, we never re-fetch its price estimate or re-notify about it -
+    including listings that failed, so a permanently-broken listing (bad
+    data, unsupported model, etc.) doesn't get retried forever.
     """
 
     __tablename__ = "seen_listings"
@@ -96,6 +105,9 @@ class SeenListing(Base):
 
     is_deal: Mapped[bool] = mapped_column(Boolean, default=False)
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.OK, index=True)
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, index=True

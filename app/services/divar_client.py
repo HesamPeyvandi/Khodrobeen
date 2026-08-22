@@ -14,6 +14,17 @@ scraping starts returning empty results, open the affected page in a real
 browser, use "Inspect element" on the relevant piece of data, and update
 the matching selector here - the rest of the codebase never needs to change.
 
+Divar's detail page shows specs in two different shapes, confirmed by
+inspecting a live listing:
+  1. Simple label:value rows (class `kt-unexpandable-row`) - e.g.
+     "برند و مدل", "گیربکس", "نوع سوخت", "قیمت پایه".
+  2. A grouped column table (class `kt-group-row`) - e.g. three headers
+     "کارکرد / مدل (سال تولید) / رنگ" each paired by position with a
+     value in a parallel row.
+We use exact class-name matches (not `[class*=...]` "contains" selectors)
+for the row containers themselves, since the substring version was also
+matching nested child elements and corrupting the extraction.
+
 IF DETAIL PAGES KEEP TIMING OUT
 ----------------------------------
 Sites hosted in Iran (Divar included) are often placed behind an Iranian
@@ -38,6 +49,7 @@ all controlled from `.env` (see `.env.example`):
 import asyncio
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 
 from playwright.async_api import Browser, Page, async_playwright
@@ -55,12 +67,15 @@ SELECTORS = {
     "listing_card_link": "article a[href*='/v/']",
     # Listing detail page (https://divar.ir/v/<slug>/<token>)
     "detail_title": "h1",
-    "detail_price": "[class*='kt-unexpandable-row'] :text('تومان')",
-    # Spec rows are typically label/value pairs; we scan all rows and match
-    # by the Persian label text rather than a fragile class name.
-    "detail_spec_rows": "[class*='kt-base-row'], [class*='kt-unexpandable-row']",
-    "detail_spec_label": "[class*='title'], [class*='kt-base-row__title'], p",
-    "detail_spec_value": "[class*='value'], [class*='kt-base-row__value'], p",
+    "detail_price": ".kt-unexpandable-row :text('تومان')",
+    # Shape 1: simple label:value rows
+    "detail_unexpandable_row": ".kt-unexpandable-row",
+    "detail_unexpandable_row_title": ".kt-unexpandable-row__title",
+    "detail_unexpandable_row_value": ".kt-unexpandable-row__value, .kt-unexpandable-row__action",
+    # Shape 2: grouped column table (headers and values line up by position)
+    "detail_group_row": ".kt-group-row",
+    "detail_group_row_header": ".kt-group-row-item__header",
+    "detail_group_row_value": ".kt-group-row-item__value",
 }
 
 SPEC_LABELS = {
@@ -95,6 +110,17 @@ class ListingDetail:
     raw_specs: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class DetailFetchResult:
+    """Wraps get_listing_detail's outcome so callers (deal_checker) can
+    record *why* a listing failed, not just that it did - this is what
+    powers the admin panel's error list and success-rate stat.
+    """
+
+    detail: ListingDetail | None
+    error: str | None = None
+
+
 def _token_from_url(url: str) -> str:
     # Divar detail URLs look like https://divar.ir/v/<slug>/<token>
     return url.rstrip("/").rsplit("/", 1)[-1]
@@ -105,6 +131,20 @@ def _jittered_delay(base_seconds: float) -> float:
     doesn't look like a fixed-interval bot.
     """
     return random.uniform(base_seconds * 0.7, base_seconds * 1.3)
+
+
+def _extract_first_year(value: str | None) -> str | None:
+    """Divar's year field sometimes comes as a range like "۱۳۸۲ - ۲۰۰۳"
+    (Persian year - Gregorian year, since one Persian year spans two
+    Gregorian ones and Divar shows both for reference). Hamrah Mechanic's
+    "سال ساخت" tab only lists the bare Persian year as its own option, so
+    pull out just the first number and keep its original (Persian) digits,
+    since that's what the tab's option labels use.
+    """
+    if not value:
+        return None
+    match = re.search(r"[0-9۰-۹]+", value)
+    return match.group(0) if match else None
 
 
 class DivarScraper:
@@ -204,7 +244,7 @@ class DivarScraper:
         await asyncio.sleep(_jittered_delay(settings.request_delay_seconds))
         return summaries
 
-    async def get_listing_detail(self, url: str) -> ListingDetail | None:
+    async def get_listing_detail(self, url: str) -> DetailFetchResult:
         page = await self._new_page()
         try:
             await self._goto_with_retry(page, url)
@@ -220,19 +260,46 @@ class DivarScraper:
             price_toman = extract_number(price_text)
 
             raw_specs: dict[str, str] = {}
-            rows = await page.locator(SELECTORS["detail_spec_rows"]).all()
+
+            # Shape 1: simple label:value rows (برند و مدل, گیربکس, نوع سوخت, ...)
+            rows = await page.locator(SELECTORS["detail_unexpandable_row"]).all()
             for row in rows:
                 try:
                     label = clean_whitespace(
-                        await row.locator(SELECTORS["detail_spec_label"]).first.inner_text()
+                        await row.locator(
+                            SELECTORS["detail_unexpandable_row_title"]
+                        ).first.inner_text(timeout=2000)
                     )
                     value = clean_whitespace(
-                        await row.locator(SELECTORS["detail_spec_value"]).last.inner_text()
+                        await row.locator(
+                            SELECTORS["detail_unexpandable_row_value"]
+                        ).first.inner_text(timeout=2000)
                     )
                 except Exception:
+                    # This row doesn't match the label/value shape - skip it fast
+                    # instead of waiting out Playwright's default 30s timeout.
                     continue
                 if label and value and label != value:
                     raw_specs[label] = value
+
+            # Shape 2: grouped column table (کارکرد / مدل (سال تولید) / رنگ, ...)
+            # Headers and values are separate flat lists that line up by position.
+            groups = await page.locator(SELECTORS["detail_group_row"]).all()
+            for group in groups:
+                try:
+                    headers = await group.locator(
+                        SELECTORS["detail_group_row_header"]
+                    ).all_inner_texts()
+                    values = await group.locator(
+                        SELECTORS["detail_group_row_value"]
+                    ).all_inner_texts()
+                except Exception:
+                    continue
+                for label, value in zip(headers, values):
+                    label = clean_whitespace(label)
+                    value = clean_whitespace(value)
+                    if label and value and label != value:
+                        raw_specs[label] = value
 
             detail = ListingDetail(
                 token=_token_from_url(url),
@@ -242,10 +309,10 @@ class DivarScraper:
                 raw_specs=raw_specs,
             )
             _fill_known_specs(detail, raw_specs)
-            return detail
-        except Exception:
+            return DetailFetchResult(detail=detail)
+        except Exception as exc:  # noqa: BLE001 - report the failure upstream, don't crash the scan
             logger.exception("Failed to read Divar listing detail: %s", url)
-            return None
+            return DetailFetchResult(detail=None, error=f"{exc.__class__.__name__}: {exc}")
         finally:
             await page.close()
             await asyncio.sleep(_jittered_delay(settings.request_delay_seconds))
@@ -259,7 +326,7 @@ def _fill_known_specs(detail: ListingDetail, raw_specs: dict[str, str]) -> None:
         return None
 
     detail.brand_model = find(*SPEC_LABELS["brand_model"])
-    detail.year = find(*SPEC_LABELS["year"])
+    detail.year = _extract_first_year(find(*SPEC_LABELS["year"]))
     detail.color = find(*SPEC_LABELS["color"])
     detail.body_status = find(*SPEC_LABELS["body_status"])
     detail.gearbox = find(*SPEC_LABELS["gearbox"])

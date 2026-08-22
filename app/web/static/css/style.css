@@ -79,6 +79,9 @@ main.container { padding-top: 32px; padding-bottom: 60px; }
   gap: 6px;
 }
 .stat-card.highlight { border-color: var(--primary); }
+.stat-card.success { border-color: var(--primary); }
+.stat-card.warning { border-color: var(--warning); }
+.stat-card.warning .stat-value { color: var(--warning); }
 .stat-value { font-size: 1.9rem; font-weight: 700; }
 .stat-label { color: var(--text-muted); font-size: .9rem; }
 
@@ -93,6 +96,7 @@ tr:last-child td { border-bottom: none; }
 .badge { padding: 4px 10px; border-radius: 999px; font-size: .78rem; }
 .badge-active { background: rgba(63, 178, 127, .15); color: var(--primary); }
 .badge-inactive { background: rgba(224, 87, 91, .15); color: var(--danger); }
+.error-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: .85rem; cursor: help; }
 
 /* Forms & buttons */
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }

@@ -87,6 +87,16 @@ app/
   scheduler/              Periodic scan job (APScheduler)
   constants/cities.py     Divar city slug ↔ Persian name mapping
 main.py                  Entry point — runs everything together
+test_divar.py            Quick smoke test: does Divar scraping work at all?
+local_test_watch.py      Watch the full scrape → estimate pipeline in a
+                          visible (non-headless) browser, one listing at a
+                          time, without touching the database or Telegram
+debug_divar_specs.py     Dumps candidate spec-row elements from a Divar
+                          listing page, for fixing divar_client.py's
+                          selectors when they stop matching
+debug_hamrah_picker.py   Dumps every result item Hamrah Mechanic's car
+                          picker shows for a query, with visibility/enabled
+                          state, for fixing price_estimator.py's selectors
 ```
 
 ## Getting started
@@ -219,6 +229,53 @@ reached` - that's the built-in overlap guard working as intended, not a
 bug, but it does mean scans are falling behind. Fixing the timeout issue
 above should resolve it; as a stopgap you can also raise
 `POLL_INTERVAL_SECONDS` and lower `MAX_LISTINGS_PER_SCAN`.
+
+## Debugging the scrapers locally
+
+Both Divar and Hamrah Mechanic are React/Next.js apps whose markup changes
+over time, so scraping breaks in ways that are much easier to diagnose by
+*watching* a real browser than by reading server logs. Three scripts help
+with that (run them from the project root, with your venv active):
+
+- **`python local_test_watch.py [city_slug] [category_slug]`** — runs the
+  real pipeline (grab a fresh listing → parse its specs → drive Hamrah
+  Mechanic's form → print the estimate) in a visible browser window,
+  without touching the database or sending anything to Telegram. This is
+  the first thing to run after any selector change.
+- **`python debug_divar_specs.py <listing_url>`** — opens a Divar listing
+  and dumps every candidate spec-row element's class and text, to help
+  find the right selector when `divar_client.py`'s extraction stops
+  working.
+- **`python debug_hamrah_picker.py "<query>"`** — opens Hamrah Mechanic's
+  car picker, types your query, and dumps every result item's text, class,
+  visibility, and enabled state — useful when a brand/model search isn't
+  matching the way `price_estimator.py` expects.
+
+All three force `HEADLESS_BROWSER=false` regardless of your `.env`, so you
+can watch exactly what the page is doing.
+
+## Tracking scrape/estimate failures in the admin panel
+
+Every listing the scheduler attempts gets a row in the database — including
+ones that failed — so nothing gets silently retried forever. The dashboard
+shows:
+
+- A **success rate** stat for the last 24 hours (successful estimates ÷
+  attempted listings, excluding intentionally-skipped `اوراقی` listings
+  from the denominator).
+- A **failures table** listing which listings got stuck, at which stage
+  (`دریافت اطلاعات دیوار` = Divar scraping, `تخمین قیمت` = Hamrah Mechanic
+  estimation), with the error message and a link to the listing.
+
+This is backed by two new columns on `SeenListing` (`status`,
+`error_message`) — see `app/db/models.py::ListingStatus`. Since this
+project doesn't use a migration tool (Alembic etc.), adding these columns
+to an *already-populated* database won't happen automatically via
+`init_db()`, which only creates missing tables, not missing columns on
+existing ones. If you're upgrading an existing deployment and see a
+database error mentioning `status` or `error_message`, drop the
+`seen_listings` table (or the whole database, if using a fresh Neon
+project anyway) and let it recreate on next startup.
 
 ## Selector maintenance
 

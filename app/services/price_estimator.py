@@ -31,6 +31,10 @@ the matching tab. This is a reasonable approximation for price purposes
 (the count of affected panels matters more than exactly which ones) but
 isn't pixel-perfect. Listings marked "اوراقی" (scrapped) skip estimation
 entirely - see the top of estimate().
+
+If page loads keep timing out, see the matching note in divar_client.py -
+the same `PAGE_TIMEOUT_MS` / `PAGE_GOTO_RETRIES` / `SCRAPER_PROXY_URL`
+settings apply here too, since Hamrah Mechanic is also an Iran-hosted site.
 """
 
 import asyncio
@@ -41,7 +45,7 @@ from dataclasses import dataclass
 from playwright.async_api import Locator, Page, async_playwright
 
 from app.config import settings
-from app.services.text_utils import extract_number
+from app.services.text_utils import extract_number, normalize_digits
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +61,6 @@ SELECTORS = {
     "picker_result_item": '[class*="car-detail__car-name"]',
     "body_status_confirm_button": 'button:has-text("تایید")',
     "color_option": '[class*="selectCarColor_color-name"]',
-    "color_confirm_button": 'button:has-text("تایید")',
     "submit_button": 'button[type="submit"]:has-text("محاسبه قیمت")',
     "result_price_main": '[class*="info-box__price__"]',
     "result_price_range": '[class*="info-box__row-price__"]',
@@ -73,6 +76,12 @@ BODY_STATUS_TABS = {
     "paint": "رنگ‌شدگی",
     "replaced": "تعویض‌شدگی",
 }
+
+# Dedicated checkbox Hamrah Mechanic shows for a car with no paint/panel
+# damage at all - used instead of leaving every per-part checkbox unticked,
+# for any Divar status that positively means "healthy" (see
+# _resolve_body_status / HEALTHY_KEYWORDS below).
+HEALTHY_BODY_STATUS_LABEL = "بدون رنگ و تعویض‌شدگی"
 
 # Persian labels for body parts as they appear in the Hamrah Mechanic
 # checkbox list, ordered roughly by how often each is the one actually
@@ -120,6 +129,36 @@ DIVAR_BODY_STATUS_MAP: dict[str, dict] = {
 # exactly match the closed list above (e.g. if Divar adds new categories,
 # or the value came from somewhere other than the standard field).
 HEALTHY_KEYWORDS = ["بدون رنگ", "سالم", "بی‌رنگ", "فاقد رنگ"]
+
+
+def _model_word_prefixes(model_words: list[str], max_words: int = 3) -> list[str]:
+    """Generates decreasing-length prefixes of the model's words, most
+    specific (multi-word) first - e.g. ["تیبا", "2", "(هاچبک)", "EX"] ->
+    ["تیبا 2", "تیبا"]. Words that are just punctuation ("-") or start with
+    a bracket are dropped, since Hamrah Mechanic's own model names are
+    almost never that decorated and including them just wastes a query.
+    """
+    cleaned = [w for w in model_words if w not in ("-",) and not w.startswith("(")]
+    prefixes = []
+    for n in range(min(max_words, len(cleaned)), 0, -1):
+        prefix = " ".join(cleaned[:n])
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
+def _strip_trim_suffix(word: str) -> str | None:
+    """Given a token like '207i' or '405SLX', returns the leading numeric
+    model code ('207', '405') if the token is digits followed by extra
+    letters. Hamrah Mechanic's model list usually only has the bare number
+    (e.g. "پژو 207") - suffixes like i/SLX/TU3 are trim details, picked
+    separately on the "تیپ" tab, and never appear as their own model entry.
+    Returns None if the word is already bare digits or has no leading digits.
+    """
+    match = re.match(r"(\d+)", word)
+    if match and match.group(1) != word:
+        return match.group(1)
+    return None
 
 
 @dataclass
@@ -246,7 +285,7 @@ class HamrahMechanicEstimator:
         await page.wait_for_timeout(500)
 
         await self._pick_brand_model(page, spec)
-        await self._pick_from_tab(page, TAB_NAMES["year"], spec.year)
+        await self._pick_year_tab(page, spec.year)
         await self._pick_from_tab(page, TAB_NAMES["trim"], spec.trim)
 
     async def _pick_brand_model(self, page: Page, spec: CarSpec) -> None:
@@ -255,15 +294,180 @@ class HamrahMechanicEstimator:
             await tab.first.click()
             await page.wait_for_timeout(300)
 
-        query = f"{spec.brand} {spec.model}".strip()
-        await page.locator(SELECTORS["brand_model_input"]).fill(query)
-        await page.wait_for_timeout(800)  # debounce + results render
+        # Divar's "برند و مدل" field often bundles trim/gearbox/engine details
+        # onto the model (e.g. "کرولا اتوماتیک XLI - 1800cc", "تیبا 2
+        # (هاچبک) EX", "207i دنده‌ای TU3"), but Hamrah Mechanic's own model
+        # list only has clean model names - sometimes just the base name
+        # ("کرولا"), sometimes base name + a distinguishing number/code
+        # ("تیبا 2", "دنا پلاس") as its OWN separate entry. Trying only the
+        # single first word conflates these: "تیبا" alone matches the
+        # generic "تیبا" entry before Hamrah Mechanic even shows "تیبا 2",
+        # picking the wrong (and differently priced) car.
+        #
+        # So instead we try decreasing-length word prefixes of the model
+        # text - most specific multi-word combination first, falling back
+        # to shorter ones - plus a digit-only version of the first word for
+        # cases like "207i" -> "207" where the suffix is purely a trim code
+        # glued onto a model number.
+        #
+        # Order matters overall: word-prefix candidates are tried BEFORE
+        # anything brand-prefixed, since domestic manufacturer names (e.g.
+        # "ایران خودرو") aren't reliably spelled the way Hamrah Mechanic's
+        # search expects (spacing/ZWNJ differences) and can return some
+        # unrelated non-empty result set. We only fall back to "click the
+        # first result" as an absolute last resort, after every candidate
+        # has failed to produce an exact text match - never mid-loop just
+        # because *a* result showed up.
+        model_words = spec.model.split() if spec.model else []
+        word_prefixes = _model_word_prefixes(model_words)
+        first_word = model_words[0] if model_words else None
+        bare_model = _strip_trim_suffix(first_word) if first_word else None
 
-        matched = await self._click_matching_result(page, spec.model)
+        candidate_queries: list[str] = list(word_prefixes)
+        if bare_model and bare_model not in candidate_queries:
+            candidate_queries.append(bare_model)
+        if spec.brand and spec.model:
+            candidate_queries.append(f"{spec.brand} {spec.model}")
+            if first_word:
+                candidate_queries.append(f"{spec.brand} {first_word}")
+            if bare_model:
+                candidate_queries.append(f"{spec.brand} {bare_model}")
+        if spec.brand:
+            candidate_queries.append(spec.brand)
+
+        # Text to try matching a result against, most specific first.
+        match_candidates = list(word_prefixes)
+        if bare_model and bare_model not in match_candidates:
+            match_candidates.append(bare_model)
+
+        matched = False
+        for query in candidate_queries:
+            query = query.strip()
+            if not query:
+                continue
+            await page.locator(SELECTORS["brand_model_input"]).fill(query)
+            await page.wait_for_timeout(800)  # debounce + results render
+
+            results = page.locator(SELECTORS["picker_result_item"])
+            if not await results.count():
+                continue  # this query returned nothing - try the next one
+
+            for candidate_text in match_candidates:
+                if await self._click_matching_result(page, candidate_text):
+                    matched = True
+                    break
+            if matched:
+                break
+            # This query returned results but none of them actually matched
+            # our model text - don't settle for whatever's first, keep
+            # trying other queries first.
+
         if not matched:
-            matched = await self._click_matching_result(page, spec.brand)
+            # Absolute last resort: nothing matched anywhere. Re-run the
+            # most specific query (a word prefix, not the broader
+            # brand-prefixed ones) and take whatever it shows, so we at
+            # least land on *a* car close to right rather than leaving the
+            # picker empty.
+            for query in candidate_queries:
+                query = query.strip()
+                if not query:
+                    continue
+                await page.locator(SELECTORS["brand_model_input"]).fill(query)
+                await page.wait_for_timeout(800)
+                results = page.locator(SELECTORS["picker_result_item"])
+                if not await results.count():
+                    continue
+                try:
+                    await results.first.scroll_into_view_if_needed(timeout=3000)
+                    await results.first.click(timeout=3000)
+                    await page.wait_for_timeout(400)
+                    matched = True
+                    logger.warning(
+                        "Hamrah Mechanic: no exact match for '%s %s' - fell back to "
+                        "the first result for query '%s'",
+                        spec.brand, spec.model, query,
+                    )
+                except Exception:
+                    continue
+                break
+
         if not matched:
-            logger.warning("Hamrah Mechanic: no brand/model match found for '%s'", query)
+            logger.warning(
+                "Hamrah Mechanic: no brand/model match found for '%s %s'",
+                spec.brand,
+                spec.model,
+            )
+
+    async def _pick_year_tab(self, page: Page, desired_year: str | None) -> None:
+        tab = page.get_by_role("tab", name=TAB_NAMES["year"])
+        if not await tab.count():
+            return
+        await tab.first.click()
+        await page.wait_for_timeout(400)
+
+        if desired_year and await self._click_matching_result(page, desired_year):
+            return
+
+        # No exact match - this happens for brand-new model years that
+        # Hamrah Mechanic's own database hasn't caught up with yet (e.g. a
+        # car listed as "۱۴۰۵" before their year list has been updated).
+        # Picking a genuinely random/oldest year here can leave the rest of
+        # the form (trim options, etc.) inconsistent with the picked year
+        # and break submission entirely - so pick whichever available year
+        # is numerically closest to what we wanted instead of just "first".
+        options = page.locator(SELECTORS["picker_result_item"])
+        count = await options.count()
+        if not count:
+            return
+
+        desired_num: int | None = None
+        if desired_year:
+            match = re.search(r"\d+", normalize_digits(desired_year))
+            if match:
+                desired_num = int(match.group(0))
+
+        if desired_num is None:
+            try:
+                await options.first.scroll_into_view_if_needed(timeout=3000)
+                await options.first.click(timeout=3000)
+                await page.wait_for_timeout(400)
+            except Exception:
+                logger.warning("Hamrah Mechanic: couldn't click first option under tab '%s'", TAB_NAMES["year"])
+            return
+
+        best_index = None
+        best_diff = None
+        for i in range(count):
+            try:
+                text = await options.nth(i).inner_text(timeout=1500)
+            except Exception:
+                continue
+            match = re.search(r"\d+", normalize_digits(text))
+            if not match:
+                continue
+            diff = abs(int(match.group(0)) - desired_num)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_index = i
+
+        if best_index is None:
+            logger.warning(
+                "Hamrah Mechanic: no numeric year options found under tab '%s', picking first instead",
+                TAB_NAMES["year"],
+            )
+            best_index = 0
+        else:
+            logger.warning(
+                "Hamrah Mechanic: exact year '%s' not offered, picking closest available option instead",
+                desired_year,
+            )
+
+        try:
+            await options.nth(best_index).scroll_into_view_if_needed(timeout=3000)
+            await options.nth(best_index).click(timeout=3000)
+            await page.wait_for_timeout(400)
+        except Exception:
+            logger.warning("Hamrah Mechanic: closest year option wasn't clickable")
 
     async def _pick_from_tab(self, page: Page, tab_label: str, desired_value: str | None) -> None:
         tab = page.get_by_role("tab", name=tab_label)
@@ -283,15 +487,30 @@ class HamrahMechanicEstimator:
 
         options = page.locator(SELECTORS["picker_result_item"])
         if await options.count():
-            await options.first.click()
-            await page.wait_for_timeout(400)
+            try:
+                await options.first.scroll_into_view_if_needed(timeout=3000)
+                await options.first.click(timeout=3000)
+                await page.wait_for_timeout(400)
+            except Exception:
+                logger.warning(
+                    "Hamrah Mechanic: couldn't click first option under tab '%s'", tab_label
+                )
 
     async def _click_matching_result(self, page: Page, text: str) -> bool:
         if not text:
             return False
         option: Locator = page.locator(SELECTORS["picker_result_item"]).filter(has_text=text)
         if await option.count():
-            await option.first.click()
+            try:
+                await option.first.scroll_into_view_if_needed(timeout=3000)
+                await option.first.click(timeout=3000)
+            except Exception:
+                logger.warning(
+                    "Hamrah Mechanic: found a result matching '%s' but couldn't click it "
+                    "(covered/off-screen/animating) - trying the next option",
+                    text,
+                )
+                return False
             await page.wait_for_timeout(400)
             return True
         return False
@@ -314,11 +533,18 @@ class HamrahMechanicEstimator:
         field = page.locator(SELECTORS["body_status_input"])
         if not await field.count():
             return
+        # For zero-mileage / brand-new cars, Hamrah Mechanic disables this
+        # field entirely (there's nothing to report). Clicking a disabled
+        # input never becomes "actionable", so Playwright would otherwise
+        # wait out its full default timeout here on every new-car listing.
+        if await field.first.is_disabled():
+            logger.info("Hamrah Mechanic: body status field is disabled (new car) - skipping")
+            return
         await field.first.click()
         await page.wait_for_timeout(400)
 
         text = (spec.body_status or "").strip()
-        parts_to_tick, tab_key = self._resolve_body_status(text)
+        parts_to_tick, tab_key, is_healthy = self._resolve_body_status(text)
 
         if parts_to_tick and tab_key:
             tab_label = BODY_STATUS_TABS[tab_key]
@@ -331,6 +557,28 @@ class HamrahMechanicEstimator:
                 if await checkbox_label.count():
                     await checkbox_label.first.click()
                     await page.wait_for_timeout(200)
+        elif is_healthy:
+            # Divar positively reported no paint/panel damage - tick Hamrah
+            # Mechanic's dedicated "healthy" checkbox instead of leaving
+            # every per-part checkbox untouched (which reads as "unknown",
+            # not "confirmed healthy").
+            healthy_checkbox = page.get_by_text(HEALTHY_BODY_STATUS_LABEL, exact=True)
+            if await healthy_checkbox.count():
+                try:
+                    await healthy_checkbox.first.scroll_into_view_if_needed(timeout=3000)
+                    await healthy_checkbox.first.click(timeout=3000)
+                    await page.wait_for_timeout(200)
+                except Exception:
+                    logger.warning(
+                        "Hamrah Mechanic: found '%s' checkbox but couldn't click it",
+                        HEALTHY_BODY_STATUS_LABEL,
+                    )
+            else:
+                logger.info(
+                    "Hamrah Mechanic: healthy body status but couldn't find the "
+                    "'%s' checkbox - leaving body status as-is",
+                    HEALTHY_BODY_STATUS_LABEL,
+                )
 
         confirm = page.locator(SELECTORS["body_status_confirm_button"])
         if await confirm.count():
@@ -339,26 +587,30 @@ class HamrahMechanicEstimator:
         else:
             await page.keyboard.press("Escape")
 
-    def _resolve_body_status(self, text: str) -> tuple[list[str], str | None]:
-        """Returns (parts_to_tick, tab_key) for the given Divar body-status
-        text. Prefers an exact match against Divar's closed list
-        (DIVAR_BODY_STATUS_MAP); falls back to a loose keyword/part-name
-        scan for anything that doesn't match exactly (e.g. Divar adding a
-        new category, or the value coming from a non-standard source).
+    def _resolve_body_status(self, text: str) -> tuple[list[str], str | None, bool]:
+        """Returns (parts_to_tick, tab_key, is_healthy). Prefers an exact
+        match against Divar's closed list (DIVAR_BODY_STATUS_MAP); falls
+        back to a loose keyword/part-name scan for anything that doesn't
+        match exactly (e.g. Divar adding a new category, or the value
+        coming from a non-standard source). is_healthy distinguishes
+        "Divar positively said no damage" (tick the dedicated healthy
+        checkbox) from "couldn't tell" (leave the dialog untouched).
         """
         if not text:
-            return [], None
+            return [], None, False
 
         mapping = DIVAR_BODY_STATUS_MAP.get(text)
         if mapping is not None:
             tab_key = mapping["tab"]
             count = mapping["count"]
-            if tab_key in (None, "skip") or count == 0:
-                return [], None
-            return PART_PRIORITY[:count], tab_key
+            if tab_key == "skip":
+                return [], None, False
+            if tab_key is None or count == 0:
+                return [], None, True
+            return PART_PRIORITY[:count], tab_key, False
 
         if any(keyword in text for keyword in HEALTHY_KEYWORDS):
-            return [], None
+            return [], None, True
 
         mentioned = self._extract_mentioned_parts(text)
         if mentioned:
@@ -368,14 +620,14 @@ class HamrahMechanicEstimator:
                 text,
                 len(mentioned),
             )
-            return mentioned, "paint"
+            return mentioned, "paint", False
 
         logger.info(
             "Hamrah Mechanic: body_status '%s' matched nothing (standard list or keywords), "
             "leaving all checkboxes unticked",
             text,
         )
-        return [], None
+        return [], None, False
 
     # -- color --------------------------------------------------------------
 
@@ -390,15 +642,33 @@ class HamrahMechanicEstimator:
 
         option = page.locator(SELECTORS["color_option"]).filter(has_text=spec.color)
         if await option.count():
-            await option.first.click()
-            await page.wait_for_timeout(400)
-
-            confirm = page.locator(SELECTORS["color_confirm_button"])
-            if await confirm.count():
-                await confirm.first.click()
-                await page.wait_for_timeout(300)
-            else:
+            try:
+                await option.first.scroll_into_view_if_needed(timeout=3000)
+                await option.first.click(timeout=3000)
+                await page.wait_for_timeout(400)
+            except Exception:
+                logger.warning(
+                    "Hamrah Mechanic: found color '%s' but couldn't click it - "
+                    "pressing Escape instead", spec.color
+                )
                 await page.keyboard.press("Escape")
+                return
+
+            # Some pickers close automatically on selection, others need an
+            # explicit confirm click (same "تایید" button pattern as the
+            # body-status dialog) - without it the picker stays open and
+            # blocks every later step. Click it if it's there.
+            confirm = page.locator(SELECTORS["body_status_confirm_button"])
+            if await confirm.count():
+                try:
+                    await confirm.first.click(timeout=3000)
+                    await page.wait_for_timeout(300)
+                except Exception:
+                    logger.warning(
+                        "Hamrah Mechanic: color confirm button found but not "
+                        "clickable - pressing Escape instead"
+                    )
+                    await page.keyboard.press("Escape")
         else:
             logger.warning("Hamrah Mechanic: color '%s' not found in picker, leaving unselected", spec.color)
             await page.keyboard.press("Escape")

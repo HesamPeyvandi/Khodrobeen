@@ -20,6 +20,10 @@
     <span class="stat-value">{{ scanned_today }}</span>
     <span class="stat-label">آگهی بررسی‌شده (۲۴ساعت)</span>
   </div>
+  <div class="card stat-card {{ 'success' if success_rate_today is not none and success_rate_today >= 80 else 'warning' if success_rate_today is not none else '' }}">
+    <span class="stat-value">{{ success_rate_today ~ "٪" if success_rate_today is not none else "-" }}</span>
+    <span class="stat-label">نرخ موفقیت (۲۴ساعت)</span>
+  </div>
   <div class="card stat-card highlight">
     <span class="stat-value">{{ deals_today }}</span>
     <span class="stat-label">معامله‌ی ارزنده (۲۴ساعت)</span>
@@ -51,6 +55,40 @@
       </tr>
       {% else %}
       <tr><td colspan="6" class="empty-row">هنوز معامله‌ی ارزنده‌ای ثبت نشده.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2 class="section-title">آگهی‌های گیرکرده / خطادار</h2>
+<div class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>عنوان آگهی</th>
+        <th>شهر</th>
+        <th>مرحله‌ی خطا</th>
+        <th>علت</th>
+        <th>زمان</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in recent_failures %}
+      <tr>
+        <td>{{ item.title or "-" }}</td>
+        <td>{{ item.city_slug }}</td>
+        <td>
+          <span class="badge badge-inactive">
+            {{ "دریافت اطلاعات دیوار" if item.status.value == "scrape_failed" else "تخمین قیمت" }}
+          </span>
+        </td>
+        <td class="error-cell" title="{{ item.error_message or '' }}">{{ (item.error_message or "نامشخص")[:80] }}</td>
+        <td>{{ item.first_seen_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        <td><a href="{{ item.url }}" target="_blank" rel="noopener">مشاهده</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty-row">هنوز خطایی ثبت نشده.</td></tr>
       {% endfor %}
     </tbody>
   </table>
