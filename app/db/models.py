@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -107,7 +108,7 @@ class SeenListing(Base):
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
 
     status: Mapped[ListingStatus] = mapped_column(Enum(ListingStatus), default=ListingStatus.OK, index=True)
-    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, index=True

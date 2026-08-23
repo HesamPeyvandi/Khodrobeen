@@ -73,6 +73,14 @@ class Settings:
     headless_browser: bool = _get_bool("HEADLESS_BROWSER", True)
     page_timeout_ms: int = _get_int("PAGE_TIMEOUT_MS", 45000)
     page_goto_retries: int = _get_int("PAGE_GOTO_RETRIES", 2)
+    # If Hamrah Mechanic navigation fails this many times in a row within a
+    # single scan cycle, stop attempting further estimates for the rest of
+    # that cycle instead of retrying a destination that's clearly down -
+    # each attempt can cost minutes (PAGE_TIMEOUT_MS x PAGE_GOTO_RETRIES),
+    # and multiplying that by every listing in a scan can make one cycle
+    # take an hour+ when the site is fully unreachable (e.g. blocked from a
+    # non-Iranian host - see SCRAPER_PROXY_URL).
+    estimator_circuit_breaker_threshold: int = _get_int("ESTIMATOR_CIRCUIT_BREAKER_THRESHOLD", 3)
     # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
     # Not needed if the scraper runs on a server with fast, unblocked access
     # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and

@@ -9,6 +9,35 @@ from app.services.price_estimator import CarSpec, HamrahMechanicEstimator
 
 logger = logging.getLogger(__name__)
 
+# Defensive cap even though error_message is a Text column with no real
+# length limit - keeps DB rows reasonably sized and avoids ever hitting a
+# column-length error again regardless of the underlying DB backend.
+MAX_ERROR_MESSAGE_LENGTH = 1000
+
+
+def _truncate_error(message: str | None) -> str | None:
+    if message is None:
+        return None
+    if len(message) <= MAX_ERROR_MESSAGE_LENGTH:
+        return message
+    return message[: MAX_ERROR_MESSAGE_LENGTH - 1] + "…"
+
+
+def _safe_commit(session: Session, record: SeenListing) -> bool:
+    """Commits a single record, rolling back on failure instead of leaving
+    the session poisoned for the rest of the scan cycle (SQLAlchemy raises
+    PendingRollbackError on every subsequent use of a session after a
+    failed commit until it's rolled back). Returns whether it succeeded.
+    """
+    try:
+        session.add(record)
+        session.commit()
+        return True
+    except Exception:
+        logger.exception("Failed to save SeenListing row for token=%s - rolling back", record.token)
+        session.rollback()
+        return False
+
 
 # Iranian domestic models where Divar's "برند و مدل" field shows only the
 # model name with no manufacturer prefix (e.g. "کوییک دنده‌ای R" instead of
@@ -95,17 +124,15 @@ async def process_city_category(
                 title=summary.title,
                 url=summary.url,
                 status=ListingStatus.SCRAPE_FAILED,
-                error_message=fetch_result.error or "unknown scrape error",
+                error_message=_truncate_error(fetch_result.error or "unknown scrape error"),
             )
-            session.add(record)
-            session.commit()
-            new_records.append(record)
+            if _safe_commit(session, record):
+                new_records.append(record)
             continue
 
         record = await _evaluate_listing(estimator, city_slug, category_slug, fetch_result.detail)
-        session.add(record)
-        session.commit()
-        new_records.append(record)
+        if _safe_commit(session, record):
+            new_records.append(record)
 
     return new_records
 
@@ -162,5 +189,5 @@ async def _evaluate_listing(
         estimated_price_toman=estimated_price,
         is_deal=is_deal,
         status=status,
-        error_message=error_message,
+        error_message=_truncate_error(error_message),
     )

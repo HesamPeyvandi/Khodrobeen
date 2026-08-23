@@ -218,7 +218,10 @@ class DivarScraper:
             links = await page.locator(SELECTORS["listing_card_link"]).all()
             seen_urls: set[str] = set()
             for link in links:
-                href = await link.get_attribute("href")
+                try:
+                    href = await link.get_attribute("href", timeout=3000)
+                except Exception:
+                    continue
                 if not href:
                     continue
                 full_url = href if href.startswith("http") else f"{BASE_URL}{href}"
@@ -226,7 +229,10 @@ class DivarScraper:
                     continue
                 seen_urls.add(full_url)
 
-                title_text = clean_whitespace(await link.inner_text())
+                try:
+                    title_text = clean_whitespace(await link.inner_text(timeout=3000))
+                except Exception:
+                    title_text = ""
                 summaries.append(
                     ListingSummary(
                         token=_token_from_url(full_url),

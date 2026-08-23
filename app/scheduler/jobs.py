@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Bot
@@ -18,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 _scan_running = False  # simple re-entrancy guard in case a scan overruns its interval
 
+# Hard ceiling on a single scan cycle's total duration. This is a safety
+# net, not the primary fix for slow scans (see the Hamrah Mechanic circuit
+# breaker in price_estimator.py, which is what actually keeps a fully-down
+# upstream site from making scans balloon to an hour+) - but it guarantees
+# the scheduler can never get stuck skipping runs forever no matter what
+# goes wrong inside a scan, since _scan_running always gets released.
+MAX_SCAN_CYCLE_SECONDS = 20 * 60
+
 
 async def run_scan_cycle(bot: Bot) -> None:
     global _scan_running
@@ -27,7 +36,14 @@ async def run_scan_cycle(bot: Bot) -> None:
 
     _scan_running = True
     try:
-        await _run_scan_cycle_inner(bot)
+        await asyncio.wait_for(_run_scan_cycle_inner(bot), timeout=MAX_SCAN_CYCLE_SECONDS)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Scan cycle exceeded the %d-minute safety limit and was cancelled - "
+            "if this keeps happening, Hamrah Mechanic/Divar are likely unreachable "
+            "and PAGE_GOTO_RETRIES or MAX_LISTINGS_PER_SCAN may need lowering",
+            MAX_SCAN_CYCLE_SECONDS // 60,
+        )
     finally:
         _scan_running = False
 
@@ -57,6 +73,7 @@ async def _run_scan_cycle_inner(bot: Bot) -> None:
                         logger.exception(
                             "Scan failed for %s/%s", city_slug, category_slug
                         )
+                        session.rollback()
                         continue
 
                     for record in new_records:
@@ -67,6 +84,10 @@ async def _run_scan_cycle_inner(bot: Bot) -> None:
                         if user_ids:
                             await notify_users(bot, user_ids, record)
                         record.notified = True
-                        session.commit()
+                        try:
+                            session.commit()
+                        except Exception:
+                            logger.exception("Failed to mark record notified for token=%s", record.token)
+                            session.rollback()
     finally:
         session.close()

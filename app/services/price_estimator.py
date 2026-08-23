@@ -42,7 +42,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from playwright.async_api import Locator, Page, async_playwright
+from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from app.config import settings
 from app.services.text_utils import extract_number, normalize_digits
@@ -186,6 +186,11 @@ class HamrahMechanicEstimator:
     def __init__(self) -> None:
         self._playwright = None
         self._browser = None
+        # Scoped to this instance's lifetime, which is exactly one scan
+        # cycle (see app/scheduler/jobs.py) - so the breaker naturally
+        # resets fresh every cycle rather than staying tripped forever.
+        self._consecutive_navigation_failures = 0
+        self._breaker_tripped = False
 
     async def __aenter__(self) -> "HamrahMechanicEstimator":
         self._playwright = await async_playwright().start()
@@ -212,11 +217,26 @@ class HamrahMechanicEstimator:
                 error="listing marked as اوراقی (scrapped) - not worth a price estimate, skipped",
             )
 
+        if self._breaker_tripped:
+            return EstimateResult(
+                estimated_price_toman=None,
+                min_price_toman=None,
+                max_price_toman=None,
+                raw_text=None,
+                success=False,
+                error=(
+                    "skipped - Hamrah Mechanic failed "
+                    f"{settings.estimator_circuit_breaker_threshold}+ times in a row this cycle, "
+                    "not retrying further this scan (see SCRAPER_PROXY_URL if this persists)"
+                ),
+            )
+
         assert self._browser is not None
         context = await self._browser.new_context(locale="fa-IR")
         page = await context.new_page()
         try:
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=settings.page_timeout_ms)
+            self._consecutive_navigation_failures = 0  # reached the site - reset the breaker
             await page.wait_for_timeout(1500)  # let the React app hydrate
 
             await self._select_car(page, spec)
@@ -266,6 +286,15 @@ class HamrahMechanicEstimator:
             )
         except Exception as exc:  # noqa: BLE001 - report any failure upstream instead of crashing the scan
             logger.exception("Hamrah Mechanic estimate failed for %s %s", spec.brand, spec.model)
+            if isinstance(exc, PlaywrightTimeoutError):
+                self._consecutive_navigation_failures += 1
+                if self._consecutive_navigation_failures >= settings.estimator_circuit_breaker_threshold:
+                    self._breaker_tripped = True
+                    logger.warning(
+                        "Hamrah Mechanic failed %d times in a row - tripping circuit breaker for the "
+                        "rest of this scan cycle",
+                        self._consecutive_navigation_failures,
+                    )
             return EstimateResult(
                 estimated_price_toman=None,
                 min_price_toman=None,
