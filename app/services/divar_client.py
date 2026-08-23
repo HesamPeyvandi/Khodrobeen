@@ -67,7 +67,6 @@ SELECTORS = {
     "listing_card_link": "article a[href*='/v/']",
     # Listing detail page (https://divar.ir/v/<slug>/<token>)
     "detail_title": "h1",
-    "detail_price": ".kt-unexpandable-row :text('تومان')",
     # Shape 1: simple label:value rows
     "detail_unexpandable_row": ".kt-unexpandable-row",
     "detail_unexpandable_row_title": ".kt-unexpandable-row__title",
@@ -79,12 +78,13 @@ SELECTORS = {
 }
 
 SPEC_LABELS = {
-    "brand_model": ("خودرو", "برند", "مدل"),
+    "brand_model": ("برند و مدل", "خودرو"),
     "year": ("سال ساخت", "سال"),
     "mileage": ("کارکرد",),
     "color": ("رنگ",),
     "body_status": ("وضعیت بدنه",),
     "gearbox": ("گیربکس",),
+    "price": ("قیمت پایه", "قیمت"),
 }
 
 
@@ -250,14 +250,14 @@ class DivarScraper:
             await self._goto_with_retry(page, url)
             await page.wait_for_timeout(1200)
 
-            title = clean_whitespace(
-                await page.locator(SELECTORS["detail_title"]).first.inner_text()
-            ) if await page.locator(SELECTORS["detail_title"]).count() else ""
-
-            price_text = ""
-            if await page.locator(SELECTORS["detail_price"]).count():
-                price_text = await page.locator(SELECTORS["detail_price"]).first.inner_text()
-            price_toman = extract_number(price_text)
+            title = ""
+            if await page.locator(SELECTORS["detail_title"]).count():
+                try:
+                    title = clean_whitespace(
+                        await page.locator(SELECTORS["detail_title"]).first.inner_text(timeout=3000)
+                    )
+                except Exception:
+                    logger.debug("Title element present but not readable in time for %s", url)
 
             raw_specs: dict[str, str] = {}
 
@@ -305,7 +305,7 @@ class DivarScraper:
                 token=_token_from_url(url),
                 url=url,
                 title=title,
-                price_toman=price_toman,
+                price_toman=None,
                 raw_specs=raw_specs,
             )
             _fill_known_specs(detail, raw_specs)
@@ -330,5 +330,6 @@ def _fill_known_specs(detail: ListingDetail, raw_specs: dict[str, str]) -> None:
     detail.color = find(*SPEC_LABELS["color"])
     detail.body_status = find(*SPEC_LABELS["body_status"])
     detail.gearbox = find(*SPEC_LABELS["gearbox"])
+    detail.price_toman = extract_number(find(*SPEC_LABELS["price"]))
     mileage_text = find(*SPEC_LABELS["mileage"])
     detail.mileage_km = extract_number(mileage_text)

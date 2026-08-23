@@ -206,6 +206,23 @@ dependency, so they're easy to split out).
 ## Troubleshooting: listing detail pages keep timing out
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
+logging `TimeoutError: Page.goto: Timeout ... exceeded` (navigation itself
+timing out), this usually means Divar's network path is bad or actively
+throttled from wherever you're hosting - see the network-path explanation
+below. But if the error is `Locator.inner_text: Timeout ... exceeded`
+instead (navigation succeeds, but reading a specific element hangs), that's
+a different problem: a selector is matching something that never becomes
+visible/stable. That was in fact the root cause of most real-world
+failures seen while building this project - a guessed price selector
+(`:text('تومان')`) was matching an element that hung for the full default
+30s timeout on nearly every listing. The fix was to stop querying the DOM
+separately for price and instead read it from the same reliable label/value
+row-scan used for every other spec field (see `SPEC_LABELS["price"]` in
+`divar_client.py`) - both `list_new_listings` and the label/value rows
+already have short, guarded timeouts (2-3s) with try/except around each
+item, so one bad row never blocks the whole page for 30s.
+
+If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
 Divar's network path is bad or actively throttled from wherever you're
 hosting. Iranian sites are often behind a CDN/anti-bot layer (Arvan Cloud is
