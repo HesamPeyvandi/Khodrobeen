@@ -88,6 +88,11 @@ class Settings:
     debug_screenshot_on_click_failure: bool = _get_bool(
         "DEBUG_SCREENSHOT_ON_CLICK_FAILURE", False
     )
+    # How long to wait for Hamrah Mechanic's estimate to actually render
+    # after clicking "محاسبه قیمت". Confirmed from real screenshots that
+    # the calculation genuinely takes 10-15s on its own - this needs
+    # comfortable margin above that, not just enough for a fast network.
+    estimate_result_wait_ms: int = _get_int("ESTIMATE_RESULT_WAIT_MS", 20000)
     # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
     # Not needed if the scraper runs on a server with fast, unblocked access
     # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and

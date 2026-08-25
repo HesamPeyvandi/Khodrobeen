@@ -248,6 +248,13 @@ tends to be generic header/nav text). The dashboard's failures table
 truncates long error messages for display — hover a cell (or open the
 listing directly) to read the full text.
 
+Debug screenshots confirmed the actual calculation genuinely takes 10-15
+seconds on its own (a loading bar was still only halfway done when an
+earlier, shorter wait gave up) — `ESTIMATE_RESULT_WAIT_MS` (default
+20000) controls how long to wait for the result after clicking submit;
+raise it if "result price element not found" keeps happening and a
+screenshot shows the loading bar still in progress.
+
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
 Divar's network path is bad or actively throttled from wherever you're

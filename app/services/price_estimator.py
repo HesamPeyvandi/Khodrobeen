@@ -471,9 +471,14 @@ class HamrahMechanicEstimator:
                 )
             # Wait adaptively for the result element to actually appear
             # instead of a fixed sleep - gives slow calculations more time
-            # while not wasting time when it's fast.
+            # while not wasting time when it's fast. Confirmed from real
+            # screenshots that the calculation itself genuinely takes
+            # 10-15s, so this needs real margin above that (see
+            # ESTIMATE_RESULT_WAIT_MS), not just enough for a fast network.
             try:
-                await page.wait_for_selector(SELECTORS["result_price_main"], timeout=8000)
+                await page.wait_for_selector(
+                    SELECTORS["result_price_main"], timeout=settings.estimate_result_wait_ms
+                )
             except Exception:
                 pass  # fall through to the diagnostic capture below
 
