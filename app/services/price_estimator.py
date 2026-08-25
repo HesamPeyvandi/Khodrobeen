@@ -263,6 +263,24 @@ class HamrahMechanicEstimator:
         except Exception:
             logger.exception("Hamrah Mechanic: failed to save debug screenshot for '%s'", debug_name)
 
+    async def _capture_failure_diagnostics(self, page: Page, debug_name: str, max_chars: int = 300) -> str:
+        """Grabs a short excerpt of whatever text is actually visible on
+        the page right now, for embedding directly in an EstimateResult's
+        error message - this shows up in the admin panel's failures table
+        without needing to enable screenshots or read server logs, and
+        tells us the real reason (a validation message, an error banner, a
+        still-loading spinner, etc.) instead of guessing. Also saves a
+        screenshot if DEBUG_SCREENSHOT_ON_CLICK_FAILURE is on.
+        """
+        if getattr(settings, "debug_screenshot_on_click_failure", False):
+            await self._save_debug_screenshot(page, debug_name)
+        try:
+            body_text = await page.locator("body").inner_text(timeout=2000)
+            excerpt = " ".join(body_text.split())[:max_chars]
+            return excerpt or "(page body was empty)"
+        except Exception as exc:
+            return f"(couldn't read page text: {exc.__class__.__name__})"
+
     async def _dismiss_overlays(self, page: Page) -> None:
         """Best-effort attempt to close common overlay patterns (cookie
         consent banners, promo/app-install popups, etc.) that can sit on
@@ -397,13 +415,14 @@ class HamrahMechanicEstimator:
 
             submit = page.locator(SELECTORS["submit_button"])
             if not await submit.count():
+                page_excerpt = await self._capture_failure_diagnostics(page, "submit_button_missing")
                 return EstimateResult(
                     estimated_price_toman=None,
                     min_price_toman=None,
                     max_price_toman=None,
                     raw_text=None,
                     success=False,
-                    error="submit button not found - required fields may be incomplete",
+                    error=f"submit button not found - page text: {page_excerpt}",
                 )
             submit_clicked, submit_error = await self._safe_click(submit.first, page=page, debug_name="submit_button")
             if not submit_clicked:
@@ -415,17 +434,24 @@ class HamrahMechanicEstimator:
                     success=False,
                     error=f"submit button not clickable: {submit_error}",
                 )
-            await page.wait_for_timeout(2500)  # estimate calculation + render
+            # Wait adaptively for the result element to actually appear
+            # instead of a fixed sleep - gives slow calculations more time
+            # while not wasting time when it's fast.
+            try:
+                await page.wait_for_selector(SELECTORS["result_price_main"], timeout=8000)
+            except Exception:
+                pass  # fall through to the diagnostic capture below
 
             price_el = page.locator(SELECTORS["result_price_main"])
             if not await price_el.count():
+                page_excerpt = await self._capture_failure_diagnostics(page, "result_price_missing")
                 return EstimateResult(
                     estimated_price_toman=None,
                     min_price_toman=None,
                     max_price_toman=None,
                     raw_text=None,
                     success=False,
-                    error="result price element not found after submit",
+                    error=f"result price element not found after submit - page text: {page_excerpt}",
                 )
 
             raw_text = await price_el.first.inner_text()
