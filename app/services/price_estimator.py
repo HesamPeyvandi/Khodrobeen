@@ -660,6 +660,12 @@ class HamrahMechanicEstimator:
         tab = page.get_by_role("tab", name=TAB_NAMES["year"])
         if not await tab.count():
             return
+
+        aria_disabled = await tab.first.get_attribute("aria-disabled")
+        if aria_disabled == "true":
+            logger.info("Hamrah Mechanic: '%s' tab is disabled for this car - skipping", TAB_NAMES["year"])
+            return
+
         clicked, detail = await self._safe_click(tab.first, page=page, debug_name="year_tab")
         if not clicked:
             logger.warning("Hamrah Mechanic: '%s' tab found but not clickable - %s", TAB_NAMES["year"], detail)
@@ -734,6 +740,17 @@ class HamrahMechanicEstimator:
         tab = page.get_by_role("tab", name=tab_label)
         if not await tab.count():
             return
+
+        aria_disabled = await tab.first.get_attribute("aria-disabled")
+        if aria_disabled == "true":
+            # This car genuinely has no data for this tab (e.g. no trim
+            # variants) - clicking would just fail with "element is not
+            # enabled" and, worse, leave the picker modal in a state where
+            # it can't be confirmed/closed normally, which then blocks
+            # every field after it. Skipping cleanly here is the fix.
+            logger.info("Hamrah Mechanic: '%s' tab is disabled for this car - skipping", tab_label)
+            return
+
         clicked, detail = await self._safe_click(tab.first, page=page, debug_name=f"tab_{tab_label}")
         if not clicked:
             logger.warning("Hamrah Mechanic: '%s' tab found but not clickable - %s", tab_label, detail)

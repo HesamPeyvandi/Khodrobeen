@@ -147,6 +147,24 @@ def _extract_first_year(value: str | None) -> str | None:
     return match.group(0) if match else None
 
 
+async def _capture_empty_page_diagnostic(page: Page) -> str:
+    """Grabs the page title and a short body-text excerpt to explain *why*
+    nothing was extractable - a rate-limit/challenge page, a login wall, a
+    genuinely blank page, etc. all look different here, whereas the caller
+    otherwise has no way to tell them apart.
+    """
+    try:
+        page_title = await page.title()
+    except Exception:
+        page_title = "(couldn't read page title)"
+    try:
+        body_text = await page.locator("body").inner_text(timeout=2000)
+        excerpt = " ".join(body_text.split())[:200] or "(body was empty)"
+    except Exception as exc:
+        excerpt = f"(couldn't read body text: {exc.__class__.__name__})"
+    return f"page title: '{page_title}', body excerpt: '{excerpt}'"
+
+
 class DivarScraper:
     def __init__(self) -> None:
         self._playwright = None
@@ -306,6 +324,24 @@ class DivarScraper:
                     value = clean_whitespace(value)
                     if label and value and label != value:
                         raw_specs[label] = value
+
+            if not title and not raw_specs:
+                # Page loaded (no navigation timeout) but nothing at all
+                # was extractable - title AND every spec row came back
+                # empty. This is different from a normal "one field is
+                # missing" case; it usually means the page never actually
+                # rendered real content (a rate-limit/challenge response
+                # that still returns 200 fast, or a listing type Divar
+                # serves with a completely different layout). Surfacing
+                # this as its own diagnostic error - rather than letting it
+                # flow through as a hollow ListingDetail that later fails
+                # with a vague "couldn't split brand/model from 'None'" -
+                # makes the real cause visible in the admin panel directly.
+                diagnostic = await _capture_empty_page_diagnostic(page)
+                return DetailFetchResult(
+                    detail=None,
+                    error=f"page loaded but no content extracted (possible rate limit) - {diagnostic}",
+                )
 
             detail = ListingDetail(
                 token=_token_from_url(url),
