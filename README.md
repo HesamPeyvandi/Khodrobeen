@@ -239,6 +239,15 @@ in `.env` — every failed click then saves a full-page screenshot to
 `./debug_screenshots/`, which is the fastest way to see exactly what's
 covering the page without a live headed session.
 
+Separately, if the result price or submit button can't be found *after*
+the form is filled out, a screenshot is saved automatically regardless of
+that setting, and the error message includes the page's current URL plus
+a text excerpt (searched for common Persian validation-error keywords
+first, rather than just grabbing whatever's at the top of the page, which
+tends to be generic header/nav text). The dashboard's failures table
+truncates long error messages for display — hover a cell (or open the
+listing directly) to read the full text.
+
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
 Divar's network path is bad or actively throttled from wherever you're

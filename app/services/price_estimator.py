@@ -264,22 +264,46 @@ class HamrahMechanicEstimator:
             logger.exception("Hamrah Mechanic: failed to save debug screenshot for '%s'", debug_name)
 
     async def _capture_failure_diagnostics(self, page: Page, debug_name: str, max_chars: int = 300) -> str:
-        """Grabs a short excerpt of whatever text is actually visible on
-        the page right now, for embedding directly in an EstimateResult's
-        error message - this shows up in the admin panel's failures table
-        without needing to enable screenshots or read server logs, and
-        tells us the real reason (a validation message, an error banner, a
-        still-loading spinner, etc.) instead of guessing. Also saves a
-        screenshot if DEBUG_SCREENSHOT_ON_CLICK_FAILURE is on.
+        """Grabs diagnostic info about the page right now, for embedding
+        directly in an EstimateResult's error message - this shows up in
+        the admin panel's failures table (hover the truncated cell, or open
+        the row directly, to see the full text) without needing to read
+        server logs.
+
+        Always saves a full-page screenshot for THIS specific diagnostic
+        path (not gated behind DEBUG_SCREENSHOT_ON_CLICK_FAILURE, since a
+        text excerpt alone has proven ambiguous - e.g. it can pick up
+        generic header/nav text that's present regardless of success or
+        failure - while a screenshot removes all ambiguity about what was
+        actually on screen). Screenshots save to ./debug_screenshots/,
+        which only makes sense to check when running locally, not on
+        Render (its filesystem isn't easily browsable).
+
+        The returned text includes the current URL (reveals whether submit
+        navigated somewhere unexpected) plus a text excerpt. Common
+        Persian validation/error keywords are searched for first, since
+        those are far more diagnostic than whatever happens to be at the
+        very top of the page (often just header/nav boilerplate).
         """
-        if getattr(settings, "debug_screenshot_on_click_failure", False):
-            await self._save_debug_screenshot(page, debug_name)
+        await self._save_debug_screenshot(page, debug_name)
+
+        url = page.url
         try:
             body_text = await page.locator("body").inner_text(timeout=2000)
-            excerpt = " ".join(body_text.split())[:max_chars]
-            return excerpt or "(page body was empty)"
+            normalized = " ".join(body_text.split())
         except Exception as exc:
-            return f"(couldn't read page text: {exc.__class__.__name__})"
+            return f"url={url} | (couldn't read page text: {exc.__class__.__name__})"
+
+        keywords = ("لطفا", "خطا", "الزامی", "ناموفق", "اشتباه", "نامعتبر")
+        for keyword in keywords:
+            idx = normalized.find(keyword)
+            if idx != -1:
+                start = max(0, idx - 30)
+                snippet = normalized[start : start + max_chars]
+                return f"url={url} | ...{snippet}"
+
+        excerpt = normalized[:max_chars] if normalized else "(page body was empty)"
+        return f"url={url} | {excerpt}"
 
     async def _dismiss_overlays(self, page: Page) -> None:
         """Best-effort attempt to close common overlay patterns (cookie
@@ -332,24 +356,34 @@ class HamrahMechanicEstimator:
 
         try:
             await page.keyboard.press("Escape")
-            await page.wait_for_timeout(300)
         except Exception:
             pass
 
-        if not await modal.count():
-            return
+        # Poll instead of a single fixed wait - closing can be animated,
+        # so checking a few times a bit apart is more reliable than one
+        # check right after a single fixed delay.
+        for _ in range(4):
+            await page.wait_for_timeout(300)
+            if not await modal.count():
+                return
 
         # Last resort: click the backdrop (#modal-root itself, near a
         # corner so we don't accidentally hit the modal content) to
         # dismiss it like a click-outside-to-close pattern.
         try:
             await page.locator("#modal-root").first.click(position={"x": 5, "y": 5}, timeout=2000)
-            await page.wait_for_timeout(300)
         except Exception:
-            logger.warning(
-                "Hamrah Mechanic: car picker modal may still be open after trim selection - "
-                "later fields might fail with 'subtree intercepts pointer events'"
-            )
+            pass
+
+        for _ in range(4):
+            await page.wait_for_timeout(300)
+            if not await modal.count():
+                return
+
+        logger.warning(
+            "Hamrah Mechanic: car picker modal still open after all close attempts - "
+            "later fields will likely fail with 'subtree intercepts pointer events'"
+        )
 
     def __init__(self) -> None:
         self._playwright = None
@@ -412,6 +446,7 @@ class HamrahMechanicEstimator:
             await self._fill_mileage(page, spec)
             await self._fill_body_status(page, spec)
             await self._fill_color(page, spec)
+            await self._close_car_picker_modal(page)  # safety net - it may have reopened
 
             submit = page.locator(SELECTORS["submit_button"])
             if not await submit.count():
