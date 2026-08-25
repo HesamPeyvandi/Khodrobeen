@@ -81,6 +81,13 @@ class Settings:
     # take an hour+ when the site is fully unreachable (e.g. blocked from a
     # non-Iranian host - see SCRAPER_PROXY_URL).
     estimator_circuit_breaker_threshold: int = _get_int("ESTIMATOR_CIRCUIT_BREAKER_THRESHOLD", 3)
+    # When true, every failed Hamrah Mechanic click saves a screenshot to
+    # ./debug_screenshots/ so you can see exactly what was covering the
+    # page (leftover modal, ad, cookie banner) without needing a live
+    # headed session.
+    debug_screenshot_on_click_failure: bool = _get_bool(
+        "DEBUG_SCREENSHOT_ON_CLICK_FAILURE", False
+    )
     # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
     # Not needed if the scraper runs on a server with fast, unblocked access
     # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and

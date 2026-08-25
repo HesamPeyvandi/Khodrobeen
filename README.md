@@ -222,6 +222,23 @@ row-scan used for every other spec field (see `SPEC_LABELS["price"]` in
 already have short, guarded timeouts (2-3s) with try/except around each
 item, so one bad row never blocks the whole page for 30s.
 
+### The car picker modal used to never close
+
+The brand/model/year/trim picker on Hamrah Mechanic opens inside a modal.
+For a while, nothing explicitly closed it after picking a trim — it stayed
+open on top of the mileage/body-status/color inputs below it, silently
+blocking clicks to *all* of them at once (this was the actual cause behind
+most "field found but not clickable" failures, not a per-field selector
+problem). `price_estimator.py`'s `_close_car_picker_modal()` now closes it
+(confirm button → Escape → click-outside, in that order) right after trim
+selection, and `_dismiss_overlays()` clears common cookie/promo popups
+right after page load too.
+
+If clicks still fail after this, set `DEBUG_SCREENSHOT_ON_CLICK_FAILURE=true`
+in `.env` — every failed click then saves a full-page screenshot to
+`./debug_screenshots/`, which is the fastest way to see exactly what's
+covering the page without a live headed session.
+
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
 Divar's network path is bad or actively throttled from wherever you're
@@ -247,6 +264,29 @@ bug, but it does mean scans are falling behind. Fixing the timeout issue
 above should resolve it; as a stopgap you can also raise
 `POLL_INTERVAL_SECONDS` and lower `MAX_LISTINGS_PER_SCAN`.
 
+## Brand/model mapping table
+
+Free-text matching against Hamrah Mechanic's search box is unreliable
+since Divar and Hamrah Mechanic often name the same car differently.
+`app/services/car_mapping.py` wraps a manually-reviewed mapping table
+(`app/data/car_brand_mapping.json`, ~933 entries) that gives the *exact*
+Hamrah Mechanic brand/model name for a given Divar listing, used instead
+of guessing whenever a match exists:
+
+- Confidently-matched rows (`status: "تطبیق یافت شد"`, 432 entries) are
+  tried first.
+- If nothing confident matches, lower-confidence "needs review" rows
+  (`status: "نیاز به بررسی"`, 333 entries) are used as a fallback — still
+  far more informed than free-text guessing.
+- If neither has an entry, `deal_checker.py` falls back to the old
+  heuristic (`_split_brand_model` + `DOMESTIC_MODEL_TO_BRAND`).
+
+To extend coverage, edit the mapping and re-export to
+`app/data/car_brand_mapping.json` (same shape as the existing entries).
+`explore_hamrah_catalog.py` is a small interactive script for exploring
+Hamrah Mechanic's brand → model drill-down navigation in a visible browser
+if you need to verify new entries by hand.
+
 ## Debugging the scrapers locally
 
 Both Divar and Hamrah Mechanic are React/Next.js apps whose markup changes
@@ -267,6 +307,10 @@ with that (run them from the project root, with your venv active):
   car picker, types your query, and dumps every result item's text, class,
   visibility, and enabled state — useful when a brand/model search isn't
   matching the way `price_estimator.py` expects.
+- **`python explore_hamrah_catalog.py`** — walks Hamrah Mechanic's
+  brand → model drill-down navigation for the first few brands in a
+  visible browser, printing what each step reveals. Useful when extending
+  `app/data/car_brand_mapping.json` with new entries.
 
 All three force `HEADLESS_BROWSER=false` regardless of your `.env`, so you
 can watch exactly what the page is doing.

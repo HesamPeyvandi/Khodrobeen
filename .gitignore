@@ -6,3 +6,4 @@ venv/
 data/
 *.db
 .DS_Store
+debug_screenshots/

@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import ListingStatus, SeenListing
+from app.services import car_mapping
 from app.services.divar_client import DivarScraper, ListingDetail
 from app.services.price_estimator import CarSpec, HamrahMechanicEstimator
 
@@ -39,15 +40,12 @@ def _safe_commit(session: Session, record: SeenListing) -> bool:
         return False
 
 
-# Iranian domestic models where Divar's "برند و مدل" field shows only the
-# model name with no manufacturer prefix (e.g. "کوییک دنده‌ای R" instead of
+# Fallback ONLY - tried after app/services/car_mapping.py (a verified
+# ~933-entry Divar<->Hamrah Mechanic mapping table) finds nothing. Iranian
+# domestic models where Divar's "برند و مدل" field shows only the model
+# name with no manufacturer prefix (e.g. "کوییک دنده‌ای R" instead of
 # "سایپا کوییک ..."), so a naive first-word split would wrongly treat the
-# model name itself as the brand. Keys are matched as a "starts with" check
-# against the raw text (longest key first, so "پراید" doesn't shadow a
-# longer more specific key if you add one later).
-# NOTE: seeded with the most common Saipa/IKCO models - verify against what
-# Hamrah Mechanic actually calls "برند" for these, and extend as you spot
-# more mismatches in real scans.
+# model name itself as the brand.
 DOMESTIC_MODEL_TO_BRAND: dict[str, str] = {
     "کوییک": "سایپا",
     "تیبا": "سایپا",
@@ -63,12 +61,13 @@ DOMESTIC_MODEL_TO_BRAND: dict[str, str] = {
 
 
 def _split_brand_model(brand_model_text: str | None) -> tuple[str | None, str | None]:
-    """Best-effort split of Divar's combined "brand model" spec field.
-    Divar usually shows something like "پژو 206" or "پراید 131" as one
-    string; the first token is treated as brand and the remainder as model.
-    For known domestic models Divar omits the manufacturer entirely (see
-    DOMESTIC_MODEL_TO_BRAND above) - those are special-cased so the model
-    name doesn't get mistaken for the brand.
+    """Best-effort split of Divar's combined "brand model" spec field, used
+    only as a fallback when car_mapping.find_hamrah_names() has no entry
+    for this listing. Divar usually shows something like "پژو 206" or
+    "پراید 131" as one string; the first token is treated as brand and the
+    remainder as model. For known domestic models Divar omits the
+    manufacturer entirely (see DOMESTIC_MODEL_TO_BRAND above) - those are
+    special-cased so the model name doesn't get mistaken for the brand.
     Adjust this if you find it mis-splitting common cases.
     """
     if not brand_model_text:
@@ -143,7 +142,20 @@ async def _evaluate_listing(
     category_slug: str,
     detail: ListingDetail,
 ) -> SeenListing:
-    brand, model = _split_brand_model(detail.brand_model)
+    mapping_entry = car_mapping.find_hamrah_names(detail.brand_model)
+    if mapping_entry:
+        brand, model = mapping_entry.hamrah_brand, mapping_entry.hamrah_model_fa
+        if mapping_entry.status != car_mapping.CONFIDENT_STATUS:
+            logger.info(
+                "Using lower-confidence brand/model mapping for '%s' -> %s/%s (status: %s)",
+                detail.brand_model,
+                brand,
+                model,
+                mapping_entry.status,
+            )
+    else:
+        brand, model = _split_brand_model(detail.brand_model)
+
     estimated_price: float | None = None
     status = ListingStatus.OK
     error_message: str | None = None
