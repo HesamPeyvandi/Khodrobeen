@@ -41,8 +41,6 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
 
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
@@ -218,14 +216,7 @@ def _last_diagnostic_line(error_text: str) -> str:
 
 
 class HamrahMechanicEstimator:
-    async def _safe_click(
-        self,
-        locator: Locator,
-        timeout: int = 5000,
-        *,
-        page: Page | None = None,
-        debug_name: str | None = None,
-    ) -> tuple[bool, str | None]:
+    async def _safe_click(self, locator: Locator, timeout: int = 5000) -> tuple[bool, str | None]:
         """click() with a short timeout instead of Playwright's 30s default,
         so one unclickable element (covered, off-screen, mid-animation, or
         just gone) never eats a huge chunk of the request budget.
@@ -235,58 +226,26 @@ class HamrahMechanicEstimator:
         intercepts pointer events") - this is much more useful for figuring
         out *why* than a generic guess, so callers should surface it rather
         than discard it.
-
-        If DEBUG_SCREENSHOT_ON_CLICK_FAILURE is on and both `page` and
-        `debug_name` are given, a failure also saves a screenshot to
-        ./debug_screenshots/ - the fastest way to see *what* was actually
-        covering the page (leftover modal, ad, cookie banner) without a
-        live headed session, especially since this failure mode tends to
-        affect every field on the page at once, not just one.
         """
         try:
             await locator.click(timeout=timeout)
             return True, None
         except Exception as exc:
-            detail = _last_diagnostic_line(str(exc))
-            if getattr(settings, "debug_screenshot_on_click_failure", False) and page is not None and debug_name is not None:
-                await self._save_debug_screenshot(page, debug_name)
-            return False, detail
+            return False, _last_diagnostic_line(str(exc))
 
-    async def _save_debug_screenshot(self, page: Page, debug_name: str) -> None:
-        try:
-            out_dir = Path("debug_screenshots")
-            out_dir.mkdir(exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            path = out_dir / f"{stamp}_{debug_name}.png"
-            await page.screenshot(path=str(path), full_page=True)
-            logger.info("Hamrah Mechanic: saved debug screenshot to %s", path)
-        except Exception:
-            logger.exception("Hamrah Mechanic: failed to save debug screenshot for '%s'", debug_name)
-
-    async def _capture_failure_diagnostics(self, page: Page, debug_name: str, max_chars: int = 300) -> str:
-        """Grabs diagnostic info about the page right now, for embedding
+    async def _capture_failure_diagnostics(self, page: Page, max_chars: int = 300) -> str:
+        """Grabs diagnostic text about the page right now, for embedding
         directly in an EstimateResult's error message - this shows up in
         the admin panel's failures table (hover the truncated cell, or open
         the row directly, to see the full text) without needing to read
         server logs.
 
-        Always saves a full-page screenshot for THIS specific diagnostic
-        path (not gated behind DEBUG_SCREENSHOT_ON_CLICK_FAILURE, since a
-        text excerpt alone has proven ambiguous - e.g. it can pick up
-        generic header/nav text that's present regardless of success or
-        failure - while a screenshot removes all ambiguity about what was
-        actually on screen). Screenshots save to ./debug_screenshots/,
-        which only makes sense to check when running locally, not on
-        Render (its filesystem isn't easily browsable).
-
-        The returned text includes the current URL (reveals whether submit
-        navigated somewhere unexpected) plus a text excerpt. Common
-        Persian validation/error keywords are searched for first, since
-        those are far more diagnostic than whatever happens to be at the
-        very top of the page (often just header/nav boilerplate).
+        Includes the current URL (reveals whether submit navigated
+        somewhere unexpected) plus a text excerpt. Common Persian
+        validation/error keywords are searched for first, since those are
+        far more diagnostic than whatever happens to be at the very top of
+        the page (often just header/nav boilerplate).
         """
-        await self._save_debug_screenshot(page, debug_name)
-
         url = page.url
         try:
             body_text = await page.locator("body").inner_text(timeout=2000)
@@ -338,9 +297,8 @@ class HamrahMechanicEstimator:
         elsewhere on this site, then Escape, then clicking the modal
         backdrop directly. Each step is best-effort; if fields after this
         point are still failing with "subtree intercepts pointer events",
-        check a debug screenshot (see DEBUG_SCREENSHOT_ON_CLICK_FAILURE)
-        taken right after this function runs to see whether the modal is
-        still open.
+        the confirm-button guess may not be the actual close mechanism for
+        this specific modal - needs live inspection to confirm.
         """
         confirm = page.locator(SELECTORS["body_status_confirm_button"])  # same "تایید" pattern
         if await confirm.count():
@@ -450,7 +408,7 @@ class HamrahMechanicEstimator:
 
             submit = page.locator(SELECTORS["submit_button"])
             if not await submit.count():
-                page_excerpt = await self._capture_failure_diagnostics(page, "submit_button_missing")
+                page_excerpt = await self._capture_failure_diagnostics(page)
                 return EstimateResult(
                     estimated_price_toman=None,
                     min_price_toman=None,
@@ -459,7 +417,21 @@ class HamrahMechanicEstimator:
                     success=False,
                     error=f"submit button not found - page text: {page_excerpt}",
                 )
-            submit_clicked, submit_error = await self._safe_click(submit.first, page=page, debug_name="submit_button")
+            submit_clicked, submit_error = await self._safe_click(submit.first)
+            if not submit_clicked and submit_error and "intercepts pointer events" in submit_error:
+                # Known case: a leftover car-picker modal is still visually
+                # covering the page even after _close_car_picker_modal()'s
+                # attempts. The submit button itself is confirmed correct
+                # (just blocked), so force-clicking through the stale
+                # overlay is safe here - unlike a blind force-click
+                # anywhere else, this only fires for this one confirmed
+                # failure signature.
+                logger.info("Hamrah Mechanic: submit blocked by leftover modal - forcing the click through it")
+                try:
+                    await submit.first.click(force=True, timeout=3000)
+                    submit_clicked = True
+                except Exception as exc:
+                    submit_error = _last_diagnostic_line(str(exc))
             if not submit_clicked:
                 return EstimateResult(
                     estimated_price_toman=None,
@@ -484,7 +456,7 @@ class HamrahMechanicEstimator:
 
             price_el = page.locator(SELECTORS["result_price_main"])
             if not await price_el.count():
-                page_excerpt = await self._capture_failure_diagnostics(page, "result_price_missing")
+                page_excerpt = await self._capture_failure_diagnostics(page)
                 return EstimateResult(
                     estimated_price_toman=None,
                     min_price_toman=None,
@@ -537,7 +509,7 @@ class HamrahMechanicEstimator:
 
     async def _select_car(self, page: Page, spec: CarSpec) -> None:
         clicked, detail = await self._safe_click(
-            page.locator(SELECTORS["car_picker_input"]), page=page, debug_name="car_picker_input"
+            page.locator(SELECTORS["car_picker_input"])
         )
         if not clicked:
             logger.warning("Hamrah Mechanic: car picker input not clickable - %s", detail)
@@ -552,7 +524,7 @@ class HamrahMechanicEstimator:
     async def _pick_brand_model(self, page: Page, spec: CarSpec) -> None:
         tab = page.get_by_role("tab", name=TAB_NAMES["brand_model"])
         if await tab.count():
-            clicked, detail = await self._safe_click(tab.first, page=page, debug_name="brand_model_tab")
+            clicked, detail = await self._safe_click(tab.first)
             if not clicked:
                 logger.warning("Hamrah Mechanic: '%s' tab found but not clickable - %s", TAB_NAMES["brand_model"], detail)
             await page.wait_for_timeout(300)
@@ -671,7 +643,7 @@ class HamrahMechanicEstimator:
             logger.info("Hamrah Mechanic: '%s' tab is disabled for this car - skipping", TAB_NAMES["year"])
             return
 
-        clicked, detail = await self._safe_click(tab.first, page=page, debug_name="year_tab")
+        clicked, detail = await self._safe_click(tab.first)
         if not clicked:
             logger.warning("Hamrah Mechanic: '%s' tab found but not clickable - %s", TAB_NAMES["year"], detail)
             return
@@ -756,7 +728,7 @@ class HamrahMechanicEstimator:
             logger.info("Hamrah Mechanic: '%s' tab is disabled for this car - skipping", tab_label)
             return
 
-        clicked, detail = await self._safe_click(tab.first, page=page, debug_name=f"tab_{tab_label}")
+        clicked, detail = await self._safe_click(tab.first)
         if not clicked:
             logger.warning("Hamrah Mechanic: '%s' tab found but not clickable - %s", tab_label, detail)
             return
@@ -826,7 +798,7 @@ class HamrahMechanicEstimator:
         if await field.first.is_disabled():
             logger.info("Hamrah Mechanic: body status field is disabled (new car) - skipping")
             return
-        clicked, detail = await self._safe_click(field.first, page=page, debug_name="body_status_field")
+        clicked, detail = await self._safe_click(field.first)
         if not clicked:
             logger.warning("Hamrah Mechanic: body status field found but not clickable - %s", detail)
             return
@@ -838,7 +810,7 @@ class HamrahMechanicEstimator:
             tab_label = BODY_STATUS_TABS[tab_key]
             tab = page.get_by_text(tab_label, exact=True)
             if await tab.count():
-                sub_clicked, sub_detail = await self._safe_click(tab.first, page=page, debug_name="body_status_subtab")
+                sub_clicked, sub_detail = await self._safe_click(tab.first)
                 if sub_clicked:
                     await page.wait_for_timeout(300)
                 else:
@@ -846,7 +818,7 @@ class HamrahMechanicEstimator:
             for part in parts_to_tick:
                 checkbox_label = page.get_by_text(part, exact=True)
                 if await checkbox_label.count():
-                    cb_clicked, cb_detail = await self._safe_click(checkbox_label.first, page=page, debug_name="body_part_checkbox")
+                    cb_clicked, cb_detail = await self._safe_click(checkbox_label.first)
                     if cb_clicked:
                         await page.wait_for_timeout(200)
                     else:
@@ -862,7 +834,7 @@ class HamrahMechanicEstimator:
                     await healthy_checkbox.first.scroll_into_view_if_needed(timeout=3000)
                 except Exception:
                     pass  # not fatal - the click below will still be attempted
-                hc_clicked, hc_detail = await self._safe_click(healthy_checkbox.first, page=page, debug_name="healthy_checkbox")
+                hc_clicked, hc_detail = await self._safe_click(healthy_checkbox.first)
                 if hc_clicked:
                     await page.wait_for_timeout(200)
                 else:
@@ -880,7 +852,7 @@ class HamrahMechanicEstimator:
 
         confirm = page.locator(SELECTORS["body_status_confirm_button"])
         if await confirm.count():
-            confirm_clicked, confirm_detail = await self._safe_click(confirm.first, page=page, debug_name="body_status_confirm")
+            confirm_clicked, confirm_detail = await self._safe_click(confirm.first)
             if confirm_clicked:
                 await page.wait_for_timeout(300)
             else:
@@ -939,7 +911,7 @@ class HamrahMechanicEstimator:
         field = page.locator(SELECTORS["color_input"])
         if not await field.count():
             return
-        clicked, detail = await self._safe_click(field.first, page=page, debug_name="color_field")
+        clicked, detail = await self._safe_click(field.first)
         if not clicked:
             logger.warning("Hamrah Mechanic: color field found but not clickable - %s", detail)
             return

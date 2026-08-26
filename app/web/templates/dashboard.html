@@ -50,7 +50,7 @@
         <td>{{ deal.city_slug }}</td>
         <td>{{ "{:,.0f}".format(deal.divar_price_toman) if deal.divar_price_toman else "-" }}</td>
         <td>{{ "{:,.0f}".format(deal.estimated_price_toman) if deal.estimated_price_toman else "-" }}</td>
-        <td>{{ deal.first_seen_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        <td>{{ deal.first_seen_at | tehran_time }}</td>
         <td><a href="{{ deal.url }}" target="_blank" rel="noopener">مشاهده</a></td>
       </tr>
       {% else %}
@@ -84,7 +84,7 @@
           </span>
         </td>
         <td class="error-cell" title="{{ item.error_message or '' }}">{{ (item.error_message or "نامشخص")[:80] }}</td>
-        <td>{{ item.first_seen_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        <td>{{ item.first_seen_at | tehran_time }}</td>
         <td><a href="{{ item.url }}" target="_blank" rel="noopener">مشاهده</a></td>
       </tr>
       {% else %}

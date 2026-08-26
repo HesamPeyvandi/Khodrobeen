@@ -272,7 +272,22 @@ class DivarScraper:
         page = await self._new_page()
         try:
             await self._goto_with_retry(page, url)
-            await page.wait_for_timeout(1200)
+            # Wait adaptively for real content to actually render instead
+            # of a fixed sleep - under network stress the page can still be
+            # an empty shell well after "domcontentloaded" fires (this was
+            # the cause behind "page loaded but no content extracted"
+            # failures - same underlying pattern fixed for Hamrah Mechanic
+            # in price_estimator.py). Falls through to the existing
+            # all-empty diagnostic below if nothing ever appears.
+            content_selector = (
+                f"{SELECTORS['detail_title']}, "
+                f"{SELECTORS['detail_unexpandable_row']}, "
+                f"{SELECTORS['detail_group_row']}"
+            )
+            try:
+                await page.wait_for_selector(content_selector, timeout=settings.divar_detail_render_wait_ms)
+            except Exception:
+                pass  # fall through - the empty-extraction diagnostic below will explain it
 
             title = ""
             if await page.locator(SELECTORS["detail_title"]).count():

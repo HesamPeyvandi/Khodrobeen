@@ -7,6 +7,7 @@ from app.config import settings
 from app.db.models import User
 from app.db.session import get_session
 from app.services.subscription import activate_subscription, disable_user, enable_user
+from app.time_utils import to_tehran
 
 router = Router(name="admin")
 
@@ -28,7 +29,7 @@ async def handle_admin_users(message: Message) -> None:
             return
         lines = []
         for u in users:
-            expires = u.subscription_expires_at.strftime("%Y-%m-%d") if u.subscription_expires_at else "-"
+            expires = to_tehran(u.subscription_expires_at).strftime("%Y-%m-%d") if u.subscription_expires_at else "-"
             lines.append(f"{u.telegram_user_id} | @{u.telegram_username or '-'} | {u.status.value} | تا {expires}")
         await message.answer("\n".join(lines))
     finally:

@@ -73,6 +73,11 @@ class Settings:
     headless_browser: bool = _get_bool("HEADLESS_BROWSER", True)
     page_timeout_ms: int = _get_int("PAGE_TIMEOUT_MS", 45000)
     page_goto_retries: int = _get_int("PAGE_GOTO_RETRIES", 2)
+    # How long to wait for a Divar listing detail page's real content
+    # (title or spec rows) to render after navigation succeeds - under
+    # network stress the page can be an empty shell well after
+    # "domcontentloaded" fires, causing "no content extracted" failures.
+    divar_detail_render_wait_ms: int = _get_int("DIVAR_DETAIL_RENDER_WAIT_MS", 8000)
     # If Hamrah Mechanic navigation fails this many times in a row within a
     # single scan cycle, stop attempting further estimates for the rest of
     # that cycle instead of retrying a destination that's clearly down -
@@ -81,13 +86,6 @@ class Settings:
     # take an hour+ when the site is fully unreachable (e.g. blocked from a
     # non-Iranian host - see SCRAPER_PROXY_URL).
     estimator_circuit_breaker_threshold: int = _get_int("ESTIMATOR_CIRCUIT_BREAKER_THRESHOLD", 3)
-    # When true, every failed Hamrah Mechanic click saves a screenshot to
-    # ./debug_screenshots/ so you can see exactly what was covering the
-    # page (leftover modal, ad, cookie banner) without needing a live
-    # headed session.
-    debug_screenshot_on_click_failure: bool = _get_bool(
-        "DEBUG_SCREENSHOT_ON_CLICK_FAILURE", False
-    )
     # How long to wait for Hamrah Mechanic's estimate to actually render
     # after clicking "محاسبه قیمت". Confirmed from real screenshots that
     # the calculation genuinely takes 10-15s on its own - this needs

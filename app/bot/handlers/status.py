@@ -6,6 +6,7 @@ from app.constants.cities import city_name
 from app.db.session import get_session
 from app.services.payment import PLANS, get_payment_provider
 from app.services.subscription import get_or_create_user
+from app.time_utils import to_tehran
 
 router = Router(name="status")
 
@@ -17,7 +18,7 @@ async def handle_status(callback: CallbackQuery) -> None:
         user, _ = get_or_create_user(session, telegram_user_id=callback.from_user.id)
         cities = ", ".join(city_name(s) for s in user.city_slugs()) or "هیچکدام"
         expires = (
-            user.subscription_expires_at.strftime("%Y-%m-%d")
+            to_tehran(user.subscription_expires_at).strftime("%Y-%m-%d")
             if user.subscription_expires_at
             else "نامحدود"
         )

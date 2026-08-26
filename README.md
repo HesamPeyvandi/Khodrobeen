@@ -49,7 +49,8 @@ service instance.
 - 📲 **Instant Telegram alerts** whenever a listing's asking price is below
   its estimated value, with the listing link, price, and estimate attached
 - 🖥 **Right-to-left Persian admin panel** (Flask) for viewing stats and
-  managing subscribers
+  managing subscribers, with all timestamps shown in Iran local time
+  (UTC+3:30) regardless of what timezone the server itself runs in
 - 💳 **Extensible subscription system** — manual activation today, wired
   through a `PaymentProvider` interface so a real gateway (e.g. Zarinpal)
   can be added later without touching the bot, the panel, or the database
@@ -229,31 +230,35 @@ For a while, nothing explicitly closed it after picking a trim — it stayed
 open on top of the mileage/body-status/color inputs below it, silently
 blocking clicks to *all* of them at once (this was the actual cause behind
 most "field found but not clickable" failures, not a per-field selector
-problem). `price_estimator.py`'s `_close_car_picker_modal()` now closes it
-(confirm button → Escape → click-outside, in that order) right after trim
-selection, and `_dismiss_overlays()` clears common cookie/promo popups
-right after page load too.
+problem). `price_estimator.py`'s `_close_car_picker_modal()` closes it
+(confirm button → Escape → click-outside, polling a few times since
+closing can be animated) right after trim selection *and* again right
+before the submit click as a safety net, and `_dismiss_overlays()` clears
+common cookie/promo popups right after page load too.
 
-If clicks still fail after this, set `DEBUG_SCREENSHOT_ON_CLICK_FAILURE=true`
-in `.env` — every failed click then saves a full-page screenshot to
-`./debug_screenshots/`, which is the fastest way to see exactly what's
-covering the page without a live headed session.
+Two more related fixes:
+- The year/trim tabs are checked for `aria-disabled="true"` before
+  clicking — some cars genuinely have no trim data in Hamrah Mechanic, and
+  clicking a disabled tab was both a wasted click *and* left the modal in a
+  state where it couldn't close normally.
+- If the submit button still fails specifically with "subtree intercepts
+  pointer events" (a leftover modal confirmed to be the cause, not some
+  other kind of failure), it's force-clicked through the stale overlay as
+  a last resort — safe here specifically because the target element is
+  confirmed to be the correct button, just visually blocked.
 
-Separately, if the result price or submit button can't be found *after*
-the form is filled out, a screenshot is saved automatically regardless of
-that setting, and the error message includes the page's current URL plus
-a text excerpt (searched for common Persian validation-error keywords
-first, rather than just grabbing whatever's at the top of the page, which
-tends to be generic header/nav text). The dashboard's failures table
-truncates long error messages for display — hover a cell (or open the
-listing directly) to read the full text.
+If the result price or submit button still can't be found after the form
+is filled out, the error message includes the page's current URL plus a
+text excerpt (searched for common Persian validation-error keywords first,
+rather than just grabbing whatever's at the top of the page, which tends
+to be generic header/nav text). The dashboard's failures table truncates
+long error messages for display — hover a cell (or open the listing
+directly) to read the full text.
 
-Debug screenshots confirmed the actual calculation genuinely takes 10-15
-seconds on its own (a loading bar was still only halfway done when an
-earlier, shorter wait gave up) — `ESTIMATE_RESULT_WAIT_MS` (default
-20000) controls how long to wait for the result after clicking submit;
-raise it if "result price element not found" keeps happening and a
-screenshot shows the loading bar still in progress.
+The calculation itself genuinely takes 10-15 seconds once submitted —
+`ESTIMATE_RESULT_WAIT_MS` (default 20000) controls how long to wait for
+the result after clicking submit; raise it if "result price element not
+found" keeps happening.
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
@@ -272,6 +277,16 @@ how likely they are to actually fix it:
    just slowly.
 3. `PAGE_GOTO_RETRIES` - each page load is already retried this many times
    with backoff before giving up; raising it trades speed for resilience.
+
+If the error is instead `page loaded but no content extracted (possible
+rate limit)` - navigation succeeded but nothing rendered - the page can
+still be an empty shell for a while after it technically finishes loading
+under network stress, same underlying pattern as the Hamrah Mechanic wait
+above. `DIVAR_DETAIL_RENDER_WAIT_MS` (default 8000) controls how long
+`get_listing_detail` waits for real content (title or spec rows) before
+giving up; the error message includes the page's title and a body-text
+excerpt, which is usually enough to tell a genuine rate-limit/challenge
+page apart from a normal slow load.
 
 If scans are consistently slower than `POLL_INTERVAL_SECONDS`, you'll see
 `apscheduler` log warnings like `maximum number of running instances
