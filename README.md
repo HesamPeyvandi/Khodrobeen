@@ -204,6 +204,45 @@ memory/timeout errors, increase `POLL_INTERVAL_SECONDS` and lower
 instead (the `app/services` and `app/scheduler` packages have no Flask
 dependency, so they're easy to split out).
 
+## How Hamrah Mechanic price estimation actually works
+
+Hamrah Mechanic doesn't publish a documented public API, but its site is
+Next.js, and this was confirmed by inspecting the real Network tab: once a
+brand/model/year/trim is selected and "محاسبه قیمت" is clicked, the page
+does a client-side route change to
+`/carprice/{brand}/{model}/{year}/{typeId}/`, which Next.js resolves by
+fetching
+`/_next/data/{buildId}/carprice/{brand}/{model}/{year}/{typeId}.json?kilometer=...&clr=...&bodycondition=...&replacedparts=...`
+and getting back structured JSON directly — no DOM scraping needed for the
+result at all.
+
+So `price_estimator.py` still uses Playwright to open the car picker and
+select brand/model/year/trim (there's no separate confirmed search API for
+that part) and to click submit (which is what triggers the route change),
+but instead of also filling in the mileage/body-status/color UI and
+scraping a result element back out of the DOM — both of which were the
+source of nearly every bug this project hit early on (stuck modals,
+disabled tabs, click timing, result-wait timing) — it reads the resolved
+`{brand}/{model}/{year}/{typeId}` straight from the post-click URL, builds
+the JSON data-URL itself with its own precise query parameters (computed
+directly from `CarSpec`, no DOM interaction needed for mileage/color/body
+status at all), fetches it with `page.request.get()` (same browser
+session/cookies), and parses the JSON response directly. Far fewer moving
+parts, and none of the fragile ones.
+
+Two things worth knowing if this ever needs revisiting:
+- The Next.js `buildId` embedded in the data-URL changes on every Hamrah
+  Mechanic deploy — it's read fresh off the live page each time
+  (`window.__NEXT_DATA__.buildId`) rather than hardcoded, so this doesn't
+  need maintenance when their site updates.
+- The real body-part identifiers (confirmed from a live API response's
+  `bodyParts` field) are `Hood`, `Trunk`, `DoorFrontLeft`, `DoorBackLeft`,
+  `DoorFrontRight`, `DoorBackRight`, `FenderFrontLeft`, `FenderBackLeft`,
+  `FenderFrontRight`, `FenderBackRight`, `Roof` — notably no bumpers, which
+  an earlier DOM-clicking version of this code had incorrectly guessed
+  existed. See `DIVAR_BODY_STATUS_MAP` in `price_estimator.py` for how
+  Divar's ten body-condition categories map to these.
+
 ## Troubleshooting: listing detail pages keep timing out
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
@@ -227,14 +266,14 @@ item, so one bad row never blocks the whole page for 30s.
 
 The brand/model/year/trim picker on Hamrah Mechanic opens inside a modal.
 For a while, nothing explicitly closed it after picking a trim — it stayed
-open on top of the mileage/body-status/color inputs below it, silently
-blocking clicks to *all* of them at once (this was the actual cause behind
-most "field found but not clickable" failures, not a per-field selector
-problem). `price_estimator.py`'s `_close_car_picker_modal()` closes it
-(confirm button → Escape → click-outside, polling a few times since
-closing can be animated) right after trim selection *and* again right
-before the submit click as a safety net, and `_dismiss_overlays()` clears
-common cookie/promo popups right after page load too.
+open on top of the page, blocking the submit click (this was the actual
+cause behind most "not clickable" failures back when the DOM-based
+mileage/body-status/color form filling was still in use — see the section
+above on why that's gone now). `price_estimator.py`'s
+`_close_car_picker_modal()` closes it (confirm button → Escape →
+click-outside, polling a few times since closing can be animated) right
+after trim selection, and `_dismiss_overlays()` clears common cookie/promo
+popups right after page load too.
 
 Two more related fixes:
 - The year/trim tabs are checked for `aria-disabled="true"` before
@@ -247,18 +286,14 @@ Two more related fixes:
   a last resort — safe here specifically because the target element is
   confirmed to be the correct button, just visually blocked.
 
-If the result price or submit button still can't be found after the form
-is filled out, the error message includes the page's current URL plus a
-text excerpt (searched for common Persian validation-error keywords first,
-rather than just grabbing whatever's at the top of the page, which tends
-to be generic header/nav text). The dashboard's failures table truncates
-long error messages for display — hover a cell (or open the listing
-directly) to read the full text.
-
-The calculation itself genuinely takes 10-15 seconds once submitted —
-`ESTIMATE_RESULT_WAIT_MS` (default 20000) controls how long to wait for
-the result after clicking submit; raise it if "result price element not
-found" keeps happening.
+If the page never navigates to a resolved `/carprice/{brand}/{model}/
+{year}/{typeId}/` URL after clicking submit, or the JSON API call itself
+fails, the error message includes the page's current URL (or the API
+response) plus a text excerpt — searched for common Persian
+validation-error keywords first, rather than just grabbing whatever's at
+the top of the page, which tends to be generic header/nav text. The
+dashboard's failures table truncates long error messages for display —
+hover a cell (or open the listing directly) to read the full text.
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means

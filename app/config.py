@@ -86,11 +86,6 @@ class Settings:
     # take an hour+ when the site is fully unreachable (e.g. blocked from a
     # non-Iranian host - see SCRAPER_PROXY_URL).
     estimator_circuit_breaker_threshold: int = _get_int("ESTIMATOR_CIRCUIT_BREAKER_THRESHOLD", 3)
-    # How long to wait for Hamrah Mechanic's estimate to actually render
-    # after clicking "محاسبه قیمت". Confirmed from real screenshots that
-    # the calculation genuinely takes 10-15s on its own - this needs
-    # comfortable margin above that, not just enough for a fast network.
-    estimate_result_wait_ms: int = _get_int("ESTIMATE_RESULT_WAIT_MS", 20000)
     # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
     # Not needed if the scraper runs on a server with fast, unblocked access
     # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and

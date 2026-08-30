@@ -1,36 +1,52 @@
 """Hamrah Mechanic ("همراه مکانیک") car price estimation adapter.
 
-Hamrah Mechanic doesn't publish a public API for its pricing tool, so this
-module drives the real web form with Playwright: open the car picker, choose
-brand -> model -> year -> trim, fill mileage / body-status / color, submit,
-and read back the estimated price (plus its reported min/max range).
+APPROACH: hybrid UI + direct API call
+----------------------------------------
+Hamrah Mechanic doesn't publish a documented public API, but its site is
+Next.js, and confirmed via live Network-tab inspection: once a brand/model
+/year/trim is selected and the "محاسبه قیمت" button is clicked, the page
+does a client-side route change to `/carprice/{brand}/{model}/{year}/{typeId}/`,
+which Next.js resolves by fetching
+`/_next/data/{buildId}/carprice/{brand}/{model}/{year}/{typeId}.json?kilometer=...&clr=...&bodycondition=...&replacedparts=...`
+and returns structured JSON directly (see `pageProps.price.{price,priceUp,priceDown}`).
+
+So this module still uses Playwright to open the car picker and select
+brand/model/year/trim (there's no separate confirmed search API for that
+part), but instead of also filling the mileage/body-status/color UI and
+scraping the result back out of the DOM - both of which were the source of
+nearly every bug this project has hit (stuck modals, disabled tabs, click
+timing, result-wait timing) - it reads the resolved `{brand}/{model}/{year}
+/{typeId}` from the post-click URL, builds the JSON data-URL itself with
+its own precise query parameters (computed straight from CarSpec, no DOM
+interaction needed), fetches it via `page.request.get()` (same browser
+session/cookies), and parses the response directly. Far fewer moving
+parts, and none of the fragile pieces.
 
 WHY [class*="..."] INSTEAD OF FULL CLASS NAMES
 -------------------------------------------------
 This site is built with Next.js using CSS Modules, so class names look like
 `detailRow_car-detail__car-name__fhOg7` - the `__fhOg7` suffix is a content
 hash that gets regenerated on every site rebuild, but the prefix before it
-(`detailRow_car-detail__car-name`) stays stable. Every selector below matches
-on that stable prefix with a `[class*="..."]` "contains" selector instead of
-the full class, so the scraper survives Hamrah Mechanic's next deploy even
-though the hashes will have changed.
+(`detailRow_car-detail__car-name`) stays stable. The (few) selectors below
+that still target the picker UI use that stable prefix instead of the full
+class, so they survive Hamrah Mechanic's next deploy even though the
+hashes will have changed.
 
-Selectors were filled in from live inspection of the real form (see the
-project's git history / chat log for the raw HTML each one came from).
-
-ONE KNOWN LIMITATION
+BODY STATUS MAPPING
 -----------------------
 Divar's "وضعیت بدنه" field is a closed list of ten standard categories
 (e.g. "رنگ‌شدگی، در ۲ ناحیه", "دوررنگ", "تصادفی" - see
 DIVAR_BODY_STATUS_MAP below), but it never says *which specific panels*
 were painted or replaced - only how extensive the damage is. Hamrah
-Mechanic's dialog wants specific parts ticked (کاپوت, سپر جلو, etc.), so
-DIVAR_BODY_STATUS_MAP approximates "N areas affected" by ticking the N
-most commonly-affected panels (front bumper, hood, front fenders first) on
-the matching tab. This is a reasonable approximation for price purposes
-(the count of affected panels matters more than exactly which ones) but
-isn't pixel-perfect. Listings marked "اوراقی" (scrapped) skip estimation
-entirely - see the top of estimate().
+Mechanic's API wants specific part identifiers (confirmed real list, from
+a live API response's `bodyParts`: Hood, Trunk, DoorFrontLeft,
+DoorBackLeft, DoorFrontRight, DoorBackRight, FenderFrontLeft,
+FenderBackLeft, FenderFrontRight, FenderBackRight, Roof - notably no
+bumpers), so DIVAR_BODY_STATUS_MAP approximates "N areas affected" by
+listing the N most commonly-affected panels. This is a reasonable
+approximation for price purposes (the count of affected panels matters
+more than exactly which ones) but isn't pixel-perfect. Listings marked
+"اوراقی" (scrapped) skip estimation entirely - see the top of estimate().
 
 If page loads keep timing out, see the matching note in divar_client.py -
 the same `PAGE_TIMEOUT_MS` / `PAGE_GOTO_RETRIES` / `SCRAPER_PROXY_URL`
@@ -41,29 +57,32 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from app.config import settings
-from app.services.text_utils import extract_number, normalize_digits
+from app.services.text_utils import normalize_digits
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.hamrah-mechanic.com/carprice/"
+DATA_URL_TEMPLATE = (
+    "https://www.hamrah-mechanic.com/_next/data/{build_id}/carprice/{brand}/{model}/{year}/{type_id}.json"
+)
+# Matches the resolved car page URL Next.js routes to after a car is fully
+# selected and submit is clicked, e.g.
+# https://www.hamrah-mechanic.com/carprice/audi/a3l/2025/2934/
+RESOLVED_URL_PATTERN = re.compile(r"/carprice/([^/]+)/([^/]+)/([^/]+)/([^/]+)/?(?:\?|$)")
 
 SELECTORS = {
     "car_picker_input": 'input[name="car"]',
     "brand_model_input": 'input[name="brand-model"]',
-    "mileage_input": 'input[name="kilometer"]',
-    "body_status_input": 'input[placeholder="تعیین وضعیت بدنه"]',
-    "color_input": 'input[placeholder="انتخاب رنگ خودرو"]',
     # Shared by brand/model, year and trim result lists alike.
     "picker_result_item": '[class*="car-detail__car-name"]',
+    # Same "تایید" confirm-button pattern used to close the car picker modal.
     "body_status_confirm_button": 'button:has-text("تایید")',
-    "color_option": '[class*="selectCarColor_color-name"]',
     "submit_button": 'button[type="submit"]:has-text("محاسبه قیمت")',
-    "result_price_main": '[class*="info-box__price__"]',
-    "result_price_range": '[class*="info-box__row-price__"]',
 }
 
 TAB_NAMES = {
@@ -72,63 +91,60 @@ TAB_NAMES = {
     "trim": "تیپ",
 }
 
-BODY_STATUS_TABS = {
-    "paint": "رنگ‌شدگی",
-    "replaced": "تعویض‌شدگی",
-}
-
-# Dedicated checkbox Hamrah Mechanic shows for a car with no paint/panel
-# damage at all - used instead of leaving every per-part checkbox unticked,
-# for any Divar status that positively means "healthy" (see
-# _resolve_body_status / HEALTHY_KEYWORDS below).
-HEALTHY_BODY_STATUS_LABEL = "بدون رنگ و تعویض‌شدگی"
-
-# Persian labels for body parts as they appear in the Hamrah Mechanic
-# checkbox list, ordered roughly by how often each is the one actually
-# painted/replaced on a used car (front-facing panels first) - used when we
-# only know a *count* of affected areas (from Divar's category below) but
-# not which specific panels. The English `id` on each <input> (e.g.
-# id="Hood") is also stable if you'd rather match on that instead of the
-# Persian label text.
-PART_PRIORITY = [
-    "سپر جلو",
-    "کاپوت",
-    "گلگیر جلو راست",
-    "گلگیر جلو چپ",
-    "درب راست جلو",
-    "درب چپ جلو",
-    "سپر عقب",
-    "صندوق عقب",
-    "درب راست عقب",
-    "درب چپ عقب",
-    "سقف",
-    "گلگیر عقب راست",
-    "گلگیر عقب چپ",
+# Confirmed directly from a live Hamrah Mechanic API response's `bodyParts`
+# list - English identifiers used as-is in the `bodycondition` /
+# `replacedparts` query params. Notably: no bumpers. Ordered by how often
+# each is the one actually painted/replaced on a used car (front-facing
+# panels first), used when we only know a *count* of affected areas (from
+# Divar's category below) but not which specific panels.
+BODY_PART_NAMES = [
+    "Hood",
+    "DoorFrontLeft",
+    "DoorFrontRight",
+    "FenderFrontLeft",
+    "FenderFrontRight",
+    "DoorBackLeft",
+    "DoorBackRight",
+    "FenderBackLeft",
+    "FenderBackRight",
+    "Trunk",
+    "Roof",
 ]
-KNOWN_BODY_PARTS = PART_PRIORITY  # kept as an alias for backwards compatibility
 
 # Divar's "وضعیت بدنه" field is a closed list, not free text - every listing
 # has exactly one of these ten values. Mapping each one to how many parts
-# (and on which Hamrah Mechanic tab) to tick is necessarily approximate
-# since Divar doesn't say *which* panels, only how extensive the damage is.
-# "skip" means: don't bother estimating at all (see estimate()).
+# were painted vs. replaced is necessarily approximate since Divar doesn't
+# say *which* panels, only how extensive the damage is.
 DIVAR_BODY_STATUS_MAP: dict[str, dict] = {
-    "سالم و بی‌خط و خش": {"tab": None, "count": 0},
-    "خط و خش جزیی": {"tab": None, "count": 0},
-    "صافکاری بی‌رنگ": {"tab": None, "count": 0},  # bodywork done, but no paint applied
-    "رنگ‌شدگی، در ۱ ناحیه": {"tab": "paint", "count": 1},
-    "رنگ‌شدگی، در ۲ ناحیه": {"tab": "paint", "count": 2},
-    "رنگ‌شدگی، در چند ناحیه": {"tab": "paint", "count": 3},
-    "دوررنگ": {"tab": "paint", "count": len(PART_PRIORITY) // 2},
-    "تمام‌رنگ": {"tab": "paint", "count": len(PART_PRIORITY)},
-    "تصادفی": {"tab": "replaced", "count": 3},
-    "اوراقی": {"tab": "skip", "count": 0},
+    "سالم و بی‌خط و خش": {"painted": 0, "replaced": 0},
+    "خط و خش جزیی": {"painted": 0, "replaced": 0},
+    "صافکاری بی‌رنگ": {"painted": 0, "replaced": 0},  # bodywork done, but no paint applied
+    "رنگ‌شدگی، در ۱ ناحیه": {"painted": 1, "replaced": 0},
+    "رنگ‌شدگی، در ۲ ناحیه": {"painted": 2, "replaced": 0},
+    "رنگ‌شدگی، در چند ناحیه": {"painted": 3, "replaced": 0},
+    "دوررنگ": {"painted": len(BODY_PART_NAMES) // 2, "replaced": 0},
+    "تمام‌رنگ": {"painted": len(BODY_PART_NAMES), "replaced": 0},
+    "تصادفی": {"painted": 0, "replaced": 3},
 }
+SCRAPPED_BODY_STATUS = "اوراقی"
 
 # Fallback keyword check for free-text body_status values that don't
-# exactly match the closed list above (e.g. if Divar adds new categories,
-# or the value came from somewhere other than the standard field).
+# exactly match the closed list above (e.g. if Divar adds new categories).
 HEALTHY_KEYWORDS = ["بدون رنگ", "سالم", "بی‌رنگ", "فاقد رنگ"]
+
+# Confirmed from a live API response's `colors` list - Divar's Persian
+# color text is matched against these (substring match) to get Hamrah
+# Mechanic's internal color identifier for the `clr` query param.
+COLOR_NAME_MAP: dict[str, str] = {
+    "سفید": "ColorWhite",
+    "مشکی": "ColorBlack",
+    "قرمز": "ColorRed",
+    "نقره‌ای": "ColorSilver",
+    "نقره ای": "ColorSilver",
+    "نوک مدادی": "ColorGray",
+    "خاکستری": "ColorGray",
+}
+DEFAULT_COLOR_NAME = "ColorOthers"
 
 
 def _model_word_prefixes(model_words: list[str], max_words: int = 3) -> list[str]:
@@ -213,6 +229,44 @@ def _last_diagnostic_line(error_text: str) -> str:
     pool = substantive if substantive else lines
     tail = pool[-2:] if len(pool) >= 2 else pool
     return " | ".join(tail)
+
+
+def _resolve_color(color_text: str | None) -> str:
+    """Maps Divar's Persian color text to Hamrah Mechanic's internal color
+    identifier for the `clr` query param (confirmed list - see
+    COLOR_NAME_MAP). Falls back to "ColorOthers" for anything unmatched,
+    same as Hamrah Mechanic's own picker does for uncommon colors.
+    """
+    if not color_text:
+        return DEFAULT_COLOR_NAME
+    text = color_text.strip()
+    for key, value in COLOR_NAME_MAP.items():
+        if key in text:
+            return value
+    return DEFAULT_COLOR_NAME
+
+
+def _resolve_body_parts(body_status_text: str | None) -> tuple[list[str], list[str]]:
+    """Returns (painted_part_names, replaced_part_names) using Hamrah
+    Mechanic's own English part identifiers, ready to join directly into
+    the `bodycondition` / `replacedparts` query params. See
+    DIVAR_BODY_STATUS_MAP for how Divar's closed-list category maps to a
+    count of affected panels.
+    """
+    text = (body_status_text or "").strip()
+    mapping = DIVAR_BODY_STATUS_MAP.get(text)
+    if mapping is None:
+        if not text or any(keyword in text for keyword in HEALTHY_KEYWORDS):
+            return [], []
+        logger.info(
+            "Hamrah Mechanic: body_status '%s' didn't match Divar's standard list - "
+            "treating as healthy (no parts marked)",
+            text,
+        )
+        return [], []
+    painted = BODY_PART_NAMES[: mapping["painted"]]
+    replaced = BODY_PART_NAMES[: mapping["replaced"]]
+    return painted, replaced
 
 
 class HamrahMechanicEstimator:
@@ -367,7 +421,7 @@ class HamrahMechanicEstimator:
             await self._playwright.stop()
 
     async def estimate(self, spec: CarSpec) -> EstimateResult:
-        if (spec.body_status or "").strip() == "اوراقی":
+        if (spec.body_status or "").strip() == SCRAPPED_BODY_STATUS:
             return EstimateResult(
                 estimated_price_toman=None,
                 min_price_toman=None,
@@ -400,11 +454,7 @@ class HamrahMechanicEstimator:
             await page.wait_for_timeout(1500)  # let the React app hydrate
             await self._dismiss_overlays(page)
 
-            await self._select_car(page, spec)
-            await self._fill_mileage(page, spec)
-            await self._fill_body_status(page, spec)
-            await self._fill_color(page, spec)
-            await self._close_car_picker_modal(page)  # safety net - it may have reopened
+            await self._select_car(page, spec)  # ends with _close_car_picker_modal()
 
             submit = page.locator(SELECTORS["submit_button"])
             if not await submit.count():
@@ -441,21 +491,18 @@ class HamrahMechanicEstimator:
                     success=False,
                     error=f"submit button not clickable: {submit_error}",
                 )
-            # Wait adaptively for the result element to actually appear
-            # instead of a fixed sleep - gives slow calculations more time
-            # while not wasting time when it's fast. Confirmed from real
-            # screenshots that the calculation itself genuinely takes
-            # 10-15s, so this needs real margin above that (see
-            # ESTIMATE_RESULT_WAIT_MS), not just enough for a fast network.
-            try:
-                await page.wait_for_selector(
-                    SELECTORS["result_price_main"], timeout=settings.estimate_result_wait_ms
-                )
-            except Exception:
-                pass  # fall through to the diagnostic capture below
 
-            price_el = page.locator(SELECTORS["result_price_main"])
-            if not await price_el.count():
+            # Clicking submit triggers a client-side Next.js route change to
+            # /carprice/{brand}/{model}/{year}/{typeId}/ - wait for that
+            # instead of a fixed sleep, then read brand/model/year/typeId
+            # straight out of the resolved URL.
+            try:
+                await page.wait_for_url(RESOLVED_URL_PATTERN, timeout=10000)
+            except Exception:
+                pass  # fall through - the regex check below reports it clearly either way
+
+            match = RESOLVED_URL_PATTERN.search(page.url)
+            if not match:
                 page_excerpt = await self._capture_failure_diagnostics(page)
                 return EstimateResult(
                     estimated_price_toman=None,
@@ -463,24 +510,73 @@ class HamrahMechanicEstimator:
                     max_price_toman=None,
                     raw_text=None,
                     success=False,
-                    error=f"result price element not found after submit - page text: {page_excerpt}",
+                    error=f"page didn't navigate to a resolved car URL after submit - {page_excerpt}",
+                )
+            brand_slug, model_slug, year_slug, type_id = match.groups()
+
+            build_id = await page.evaluate("() => window.__NEXT_DATA__ && window.__NEXT_DATA__.buildId")
+            if not build_id:
+                return EstimateResult(
+                    estimated_price_toman=None,
+                    min_price_toman=None,
+                    max_price_toman=None,
+                    raw_text=None,
+                    success=False,
+                    error=f"couldn't read Next.js buildId from the page (url={page.url})",
                 )
 
-            raw_text = await price_el.first.inner_text()
-            price = extract_number(raw_text)
+            painted_parts, replaced_parts = _resolve_body_parts(spec.body_status)
+            query: dict[str, str] = {}
+            if spec.mileage_km is not None:
+                query["kilometer"] = str(int(spec.mileage_km))
+            query["clr"] = _resolve_color(spec.color)
+            if not painted_parts and not replaced_parts:
+                query["bodycondition"] = "WithoutColor"
+                query["body"] = "noColoredOrChanged"
+            else:
+                query["bodycondition"] = ",".join(painted_parts) if painted_parts else "WithoutColor"
+                if replaced_parts:
+                    query["replacedparts"] = ",".join(replaced_parts)
+            query["brand"] = brand_slug
+            query["model"] = model_slug
+            query["year"] = year_slug
+            query["typeId"] = type_id
 
-            min_price = max_price = None
-            range_els = await page.locator(SELECTORS["result_price_range"]).all()
-            if len(range_els) >= 2:
-                min_price = extract_number(await range_els[0].inner_text())
-                max_price = extract_number(await range_els[1].inner_text())
+            data_url = DATA_URL_TEMPLATE.format(
+                build_id=build_id, brand=brand_slug, model=model_slug, year=year_slug, type_id=type_id
+            )
+            data_url = f"{data_url}?{urlencode(query)}"
+
+            response = await page.request.get(data_url, headers={"x-nextjs-data": "1"})
+            if response.status != 200:
+                body_excerpt = (await response.text())[:300]
+                return EstimateResult(
+                    estimated_price_toman=None,
+                    min_price_toman=None,
+                    max_price_toman=None,
+                    raw_text=None,
+                    success=False,
+                    error=f"price API returned HTTP {response.status}: {body_excerpt}",
+                )
+
+            payload = await response.json()
+            price_info = (payload.get("pageProps") or {}).get("price") or {}
+            if price_info.get("price") is None:
+                return EstimateResult(
+                    estimated_price_toman=None,
+                    min_price_toman=None,
+                    max_price_toman=None,
+                    raw_text=None,
+                    success=False,
+                    error=f"price API response had no price field (url={data_url})",
+                )
 
             return EstimateResult(
-                estimated_price_toman=price,
-                min_price_toman=min_price,
-                max_price_toman=max_price,
-                raw_text=raw_text,
-                success=price is not None,
+                estimated_price_toman=price_info.get("price"),
+                min_price_toman=price_info.get("priceDown"),
+                max_price_toman=price_info.get("priceUp"),
+                raw_text=str(price_info.get("price")),
+                success=True,
             )
         except Exception as exc:  # noqa: BLE001 - report any failure upstream instead of crashing the scan
             logger.exception("Hamrah Mechanic estimate failed for %s %s", spec.brand, spec.model)
@@ -772,183 +868,6 @@ class HamrahMechanicEstimator:
             await page.wait_for_timeout(400)
             return True
         return False
-
-    # -- mileage --------------------------------------------------------------
-
-    async def _fill_mileage(self, page: Page, spec: CarSpec) -> None:
-        if spec.mileage_km is None:
-            return
-        field = page.locator(SELECTORS["mileage_input"])
-        if await field.count():
-            await field.first.fill(str(int(spec.mileage_km)))
-
-    # -- body status ------------------------------------------------------------
-
-    def _extract_mentioned_parts(self, body_status: str) -> list[str]:
-        return [part for part in PART_PRIORITY if part in body_status]
-
-    async def _fill_body_status(self, page: Page, spec: CarSpec) -> None:
-        field = page.locator(SELECTORS["body_status_input"])
-        if not await field.count():
-            return
-        # For zero-mileage / brand-new cars, Hamrah Mechanic disables this
-        # field entirely (there's nothing to report). Clicking a disabled
-        # input never becomes "actionable", so Playwright would otherwise
-        # wait out its full default timeout here on every new-car listing.
-        if await field.first.is_disabled():
-            logger.info("Hamrah Mechanic: body status field is disabled (new car) - skipping")
-            return
-        clicked, detail = await self._safe_click(field.first)
-        if not clicked:
-            logger.warning("Hamrah Mechanic: body status field found but not clickable - %s", detail)
-            return
-        await page.wait_for_timeout(400)
-        text = (spec.body_status or "").strip()
-        parts_to_tick, tab_key, is_healthy = self._resolve_body_status(text)
-
-        if parts_to_tick and tab_key:
-            tab_label = BODY_STATUS_TABS[tab_key]
-            tab = page.get_by_text(tab_label, exact=True)
-            if await tab.count():
-                sub_clicked, sub_detail = await self._safe_click(tab.first)
-                if sub_clicked:
-                    await page.wait_for_timeout(300)
-                else:
-                    logger.warning("Hamrah Mechanic: body status sub-tab '%s' not clickable - %s", tab_label, sub_detail)
-            for part in parts_to_tick:
-                checkbox_label = page.get_by_text(part, exact=True)
-                if await checkbox_label.count():
-                    cb_clicked, cb_detail = await self._safe_click(checkbox_label.first)
-                    if cb_clicked:
-                        await page.wait_for_timeout(200)
-                    else:
-                        logger.warning("Hamrah Mechanic: body part checkbox '%s' not clickable - %s", part, cb_detail)
-        elif is_healthy:
-            # Divar positively reported no paint/panel damage - tick Hamrah
-            # Mechanic's dedicated "healthy" checkbox instead of leaving
-            # every per-part checkbox untouched (which reads as "unknown",
-            # not "confirmed healthy").
-            healthy_checkbox = page.get_by_text(HEALTHY_BODY_STATUS_LABEL, exact=True)
-            if await healthy_checkbox.count():
-                try:
-                    await healthy_checkbox.first.scroll_into_view_if_needed(timeout=3000)
-                except Exception:
-                    pass  # not fatal - the click below will still be attempted
-                hc_clicked, hc_detail = await self._safe_click(healthy_checkbox.first)
-                if hc_clicked:
-                    await page.wait_for_timeout(200)
-                else:
-                    logger.warning(
-                        "Hamrah Mechanic: found '%s' checkbox but couldn't click it - %s",
-                        HEALTHY_BODY_STATUS_LABEL,
-                        hc_detail,
-                    )
-            else:
-                logger.info(
-                    "Hamrah Mechanic: healthy body status but couldn't find the "
-                    "'%s' checkbox - leaving body status as-is",
-                    HEALTHY_BODY_STATUS_LABEL,
-                )
-
-        confirm = page.locator(SELECTORS["body_status_confirm_button"])
-        if await confirm.count():
-            confirm_clicked, confirm_detail = await self._safe_click(confirm.first)
-            if confirm_clicked:
-                await page.wait_for_timeout(300)
-            else:
-                logger.warning("Hamrah Mechanic: body status confirm button not clickable - %s", confirm_detail)
-                await page.keyboard.press("Escape")
-        else:
-            await page.keyboard.press("Escape")
-
-    def _resolve_body_status(self, text: str) -> tuple[list[str], str | None, bool]:
-        """Returns (parts_to_tick, tab_key, is_healthy). Prefers an exact
-        match against Divar's closed list (DIVAR_BODY_STATUS_MAP); falls
-        back to a loose keyword/part-name scan for anything that doesn't
-        match exactly (e.g. Divar adding a new category, or the value
-        coming from a non-standard source). is_healthy distinguishes
-        "Divar positively said no damage" (tick the dedicated healthy
-        checkbox) from "couldn't tell" (leave the dialog untouched).
-        """
-        if not text:
-            return [], None, False
-
-        mapping = DIVAR_BODY_STATUS_MAP.get(text)
-        if mapping is not None:
-            tab_key = mapping["tab"]
-            count = mapping["count"]
-            if tab_key == "skip":
-                return [], None, False
-            if tab_key is None or count == 0:
-                return [], None, True
-            return PART_PRIORITY[:count], tab_key, False
-
-        if any(keyword in text for keyword in HEALTHY_KEYWORDS):
-            return [], None, True
-
-        mentioned = self._extract_mentioned_parts(text)
-        if mentioned:
-            logger.info(
-                "Hamrah Mechanic: body_status '%s' didn't match Divar's standard list, "
-                "using keyword fallback (%d part(s) matched)",
-                text,
-                len(mentioned),
-            )
-            return mentioned, "paint", False
-
-        logger.info(
-            "Hamrah Mechanic: body_status '%s' matched nothing (standard list or keywords), "
-            "leaving all checkboxes unticked",
-            text,
-        )
-        return [], None, False
-
-    # -- color --------------------------------------------------------------
-
-    async def _fill_color(self, page: Page, spec: CarSpec) -> None:
-        if not spec.color:
-            return
-        field = page.locator(SELECTORS["color_input"])
-        if not await field.count():
-            return
-        clicked, detail = await self._safe_click(field.first)
-        if not clicked:
-            logger.warning("Hamrah Mechanic: color field found but not clickable - %s", detail)
-            return
-        await page.wait_for_timeout(400)
-
-        option = page.locator(SELECTORS["color_option"]).filter(has_text=spec.color)
-        if await option.count():
-            try:
-                await option.first.scroll_into_view_if_needed(timeout=3000)
-                await option.first.click(timeout=3000)
-                await page.wait_for_timeout(400)
-            except Exception:
-                logger.warning(
-                    "Hamrah Mechanic: found color '%s' but couldn't click it - "
-                    "pressing Escape instead", spec.color
-                )
-                await page.keyboard.press("Escape")
-                return
-
-            # Some pickers close automatically on selection, others need an
-            # explicit confirm click (same "تایید" button pattern as the
-            # body-status dialog) - without it the picker stays open and
-            # blocks every later step. Click it if it's there.
-            confirm = page.locator(SELECTORS["body_status_confirm_button"])
-            if await confirm.count():
-                try:
-                    await confirm.first.click(timeout=3000)
-                    await page.wait_for_timeout(300)
-                except Exception:
-                    logger.warning(
-                        "Hamrah Mechanic: color confirm button found but not "
-                        "clickable - pressing Escape instead"
-                    )
-                    await page.keyboard.press("Escape")
-        else:
-            logger.warning("Hamrah Mechanic: color '%s' not found in picker, leaving unselected", spec.color)
-            await page.keyboard.press("Escape")
 
 
 if __name__ == "__main__":
