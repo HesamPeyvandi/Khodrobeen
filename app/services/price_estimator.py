@@ -454,7 +454,19 @@ class HamrahMechanicEstimator:
             await page.wait_for_timeout(1500)  # let the React app hydrate
             await self._dismiss_overlays(page)
 
-            await self._select_car(page, spec)  # ends with _close_car_picker_modal()
+            car_selected = await self._select_car(page, spec)  # ends with _close_car_picker_modal()
+            if not car_selected:
+                return EstimateResult(
+                    estimated_price_toman=None,
+                    min_price_toman=None,
+                    max_price_toman=None,
+                    raw_text=None,
+                    success=False,
+                    error=(
+                        f"'{spec.brand} {spec.model}' not found in Hamrah Mechanic's "
+                        "car database (search returned no results)"
+                    ),
+                )
 
             submit = page.locator(SELECTORS["submit_button"])
             if not await submit.count():
@@ -603,21 +615,32 @@ class HamrahMechanicEstimator:
 
     # -- car picker (brand/model -> year -> trim) ---------------------------
 
-    async def _select_car(self, page: Page, spec: CarSpec) -> None:
+    async def _select_car(self, page: Page, spec: CarSpec) -> bool:
+        """Returns whether a brand/model was actually selected. False means
+        this car isn't in Hamrah Mechanic's database (or the search text
+        needs a different form) - callers should stop and report that
+        clearly rather than continuing on to click submit against an empty
+        form, which just produces a confusing "didn't navigate anywhere"
+        error instead of the real reason.
+        """
         clicked, detail = await self._safe_click(
             page.locator(SELECTORS["car_picker_input"])
         )
         if not clicked:
             logger.warning("Hamrah Mechanic: car picker input not clickable - %s", detail)
-            return
+            return False
         await page.wait_for_timeout(500)
 
-        await self._pick_brand_model(page, spec)
+        matched = await self._pick_brand_model(page, spec)
+        if not matched:
+            return False
+
         await self._pick_year_tab(page, spec.year)
         await self._pick_from_tab(page, TAB_NAMES["trim"], spec.trim)
         await self._close_car_picker_modal(page)
+        return True
 
-    async def _pick_brand_model(self, page: Page, spec: CarSpec) -> None:
+    async def _pick_brand_model(self, page: Page, spec: CarSpec) -> bool:
         tab = page.get_by_role("tab", name=TAB_NAMES["brand_model"])
         if await tab.count():
             clicked, detail = await self._safe_click(tab.first)
@@ -724,10 +747,12 @@ class HamrahMechanicEstimator:
 
         if not matched:
             logger.warning(
-                "Hamrah Mechanic: no brand/model match found for '%s %s'",
+                "Hamrah Mechanic: no brand/model match found for '%s %s' - not in Hamrah "
+                "Mechanic's database (or the search text needs a different form)",
                 spec.brand,
                 spec.model,
             )
+        return matched
 
     async def _pick_year_tab(self, page: Page, desired_year: str | None) -> None:
         tab = page.get_by_role("tab", name=TAB_NAMES["year"])
