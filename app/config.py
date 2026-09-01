@@ -86,6 +86,12 @@ class Settings:
     # take an hour+ when the site is fully unreachable (e.g. blocked from a
     # non-Iranian host - see SCRAPER_PROXY_URL).
     estimator_circuit_breaker_threshold: int = _get_int("ESTIMATOR_CIRCUIT_BREAKER_THRESHOLD", 3)
+    # How long to wait for the page to navigate to the resolved car URL
+    # after clicking submit, AND for the follow-up JSON API call to
+    # respond. Confirmed the underlying calculation genuinely takes 10-15s
+    # under normal conditions, more under network stress - keep this well
+    # above that.
+    estimate_navigation_timeout_ms: int = _get_int("ESTIMATE_NAVIGATION_TIMEOUT_MS", 30000)
     # Optional proxy for the scraper's own browser (Divar + Hamrah Mechanic).
     # Not needed if the scraper runs on a server with fast, unblocked access
     # to Iranian sites. Useful when hosting outside Iran (e.g. Render) and

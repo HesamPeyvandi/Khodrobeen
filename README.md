@@ -295,6 +295,27 @@ the top of the page, which tends to be generic header/nav text. The
 dashboard's failures table truncates long error messages for display —
 hover a cell (or open the listing directly) to read the full text.
 
+Two related things worth knowing about this specific error:
+
+- If the brand/model search returns **no results at all**, the estimator
+  now fails immediately with `'<brand> <model>' not found in Hamrah
+  Mechanic's car database` instead of continuing on to click submit
+  against an empty form (which used to produce this same confusing
+  "didn't navigate anywhere" error with no indication of the real cause).
+  This is expected for very new/rare car models Hamrah Mechanic simply
+  doesn't carry yet — not something to "fix" further.
+- If the brand/model **was** found but this error still shows up, it's
+  almost always the same network-slowness pattern discussed above: the
+  post-submit navigation and the follow-up JSON API call both wait up to
+  `ESTIMATE_NAVIGATION_TIMEOUT_MS` (default 30000) - raise it if this
+  keeps happening alongside literal `Request timed out after 30000ms`
+  errors, which confirm it's a timing issue rather than a real failure.
+  (Historical note: an earlier version of this timeout logic had a bug
+  where reaching Hamrah Mechanic's landing page reset the failure counter
+  even if the actual estimate then timed out, so the circuit breaker never
+  accumulated failures correctly across scans — fixed by only resetting
+  it on a fully successful estimate.)
+
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
 Divar's network path is bad or actively throttled from wherever you're

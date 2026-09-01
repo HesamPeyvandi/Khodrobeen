@@ -450,7 +450,6 @@ class HamrahMechanicEstimator:
         page = await context.new_page()
         try:
             await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=settings.page_timeout_ms)
-            self._consecutive_navigation_failures = 0  # reached the site - reset the breaker
             await page.wait_for_timeout(1500)  # let the React app hydrate
             await self._dismiss_overlays(page)
 
@@ -509,7 +508,7 @@ class HamrahMechanicEstimator:
             # instead of a fixed sleep, then read brand/model/year/typeId
             # straight out of the resolved URL.
             try:
-                await page.wait_for_url(RESOLVED_URL_PATTERN, timeout=10000)
+                await page.wait_for_url(RESOLVED_URL_PATTERN, timeout=settings.estimate_navigation_timeout_ms)
             except Exception:
                 pass  # fall through - the regex check below reports it clearly either way
 
@@ -559,7 +558,9 @@ class HamrahMechanicEstimator:
             )
             data_url = f"{data_url}?{urlencode(query)}"
 
-            response = await page.request.get(data_url, headers={"x-nextjs-data": "1"})
+            response = await page.request.get(
+                data_url, headers={"x-nextjs-data": "1"}, timeout=settings.estimate_navigation_timeout_ms
+            )
             if response.status != 200:
                 body_excerpt = (await response.text())[:300]
                 return EstimateResult(
@@ -583,6 +584,7 @@ class HamrahMechanicEstimator:
                     error=f"price API response had no price field (url={data_url})",
                 )
 
+            self._consecutive_navigation_failures = 0  # a full successful estimate - reset the breaker
             return EstimateResult(
                 estimated_price_toman=price_info.get("price"),
                 min_price_toman=price_info.get("priceDown"),
@@ -592,7 +594,13 @@ class HamrahMechanicEstimator:
             )
         except Exception as exc:  # noqa: BLE001 - report any failure upstream instead of crashing the scan
             logger.exception("Hamrah Mechanic estimate failed for %s %s", spec.brand, spec.model)
-            if isinstance(exc, PlaywrightTimeoutError):
+            error_text_lower = str(exc).lower()
+            is_timeout = (
+                isinstance(exc, PlaywrightTimeoutError)
+                or "timeout" in error_text_lower
+                or "timed out" in error_text_lower
+            )
+            if is_timeout:
                 self._consecutive_navigation_failures += 1
                 if self._consecutive_navigation_failures >= settings.estimator_circuit_breaker_threshold:
                     self._breaker_tripped = True
