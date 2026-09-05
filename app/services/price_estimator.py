@@ -507,13 +507,21 @@ class HamrahMechanicEstimator:
             # /carprice/{brand}/{model}/{year}/{typeId}/ - wait for that
             # instead of a fixed sleep, then read brand/model/year/typeId
             # straight out of the resolved URL.
+            navigation_error: Exception | None = None
             try:
                 await page.wait_for_url(RESOLVED_URL_PATTERN, timeout=settings.estimate_navigation_timeout_ms)
-            except Exception:
-                pass  # fall through - the regex check below reports it clearly either way
+            except Exception as exc:
+                navigation_error = exc
 
             match = RESOLVED_URL_PATTERN.search(page.url)
             if not match:
+                if navigation_error is not None:
+                    # Don't mask a real timeout as a generic "didn't
+                    # navigate" message - re-raise so the outer handler
+                    # both reports the actual reason (e.g. "Timeout 30000ms
+                    # exceeded") and correctly counts it toward the circuit
+                    # breaker, same as every other navigation failure.
+                    raise navigation_error
                 page_excerpt = await self._capture_failure_diagnostics(page)
                 return EstimateResult(
                     estimated_price_toman=None,

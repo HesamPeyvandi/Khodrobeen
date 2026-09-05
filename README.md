@@ -307,14 +307,22 @@ Two related things worth knowing about this specific error:
 - If the brand/model **was** found but this error still shows up, it's
   almost always the same network-slowness pattern discussed above: the
   post-submit navigation and the follow-up JSON API call both wait up to
-  `ESTIMATE_NAVIGATION_TIMEOUT_MS` (default 30000) - raise it if this
-  keeps happening alongside literal `Request timed out after 30000ms`
-  errors, which confirm it's a timing issue rather than a real failure.
-  (Historical note: an earlier version of this timeout logic had a bug
-  where reaching Hamrah Mechanic's landing page reset the failure counter
-  even if the actual estimate then timed out, so the circuit breaker never
-  accumulated failures correctly across scans — fixed by only resetting
-  it on a fully successful estimate.)
+  `ESTIMATE_NAVIGATION_TIMEOUT_MS` (default 45000) - raise it if this
+  keeps happening alongside literal `Request timed out after Xms` errors,
+  which confirm it's a timing issue rather than a real failure. Real
+  production evidence showed 30s (the previous default) still wasn't
+  always enough.
+  (Historical notes on this specific error path, since it went through a
+  couple of real bugs before settling: an earlier version reset the
+  circuit-breaker failure counter just for reaching Hamrah Mechanic's
+  landing page, even if the actual estimate then timed out, so failures
+  never accumulated correctly across scans — fixed by only resetting on a
+  fully successful estimate. A separate bug silently swallowed the
+  post-submit navigation timeout instead of surfacing it, which both hid
+  the real reason behind the generic "didn't navigate" message *and* kept
+  it from ever counting toward the circuit breaker at all — fixed by
+  re-raising that timeout so it's reported and counted like every other
+  navigation failure.)
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
