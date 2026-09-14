@@ -287,6 +287,19 @@ class HamrahMechanicEstimator:
         except Exception as exc:
             return False, _last_diagnostic_line(str(exc))
 
+    async def _safe_fill(self, locator: Locator, text: str, timeout: int = 5000) -> tuple[bool, str | None]:
+        """Same idea as _safe_click but for fill() - the brand/model search
+        box is filled repeatedly (once per candidate query tried), so a
+        single unresponsive fill() at Playwright's 30s default can burn a
+        large chunk of the whole estimate's time budget across a few
+        retries. Returns (success, error_detail).
+        """
+        try:
+            await locator.fill(text, timeout=timeout)
+            return True, None
+        except Exception as exc:
+            return False, _last_diagnostic_line(str(exc))
+
     async def _capture_failure_diagnostics(self, page: Page, max_chars: int = 300) -> str:
         """Grabs diagnostic text about the page right now, for embedding
         directly in an EstimateResult's error message - this shows up in
@@ -509,7 +522,23 @@ class HamrahMechanicEstimator:
             # straight out of the resolved URL.
             navigation_error: Exception | None = None
             try:
-                await page.wait_for_url(RESOLVED_URL_PATTERN, timeout=settings.estimate_navigation_timeout_ms)
+                # page.wait_for_url() ties to Playwright's navigation-
+                # lifecycle events (load/domcontentloaded/etc), which
+                # don't map cleanly onto a Next.js client-side route push -
+                # confirmed from a real timeout log showing it was waiting
+                # for the full 'load' event, meaning it was waiting for
+                # every image on this photo-heavy page to finish loading,
+                # not just for the URL itself to change. Polling page.url
+                # directly sidesteps that entirely: it only cares about the
+                # URL string, which updates near-instantly on a client-side
+                # route push regardless of what else is still loading.
+                poll_interval_ms = 300
+                elapsed_ms = 0
+                while elapsed_ms < settings.estimate_navigation_timeout_ms:
+                    if RESOLVED_URL_PATTERN.search(page.url):
+                        break
+                    await page.wait_for_timeout(poll_interval_ms)
+                    elapsed_ms += poll_interval_ms
             except Exception as exc:
                 navigation_error = exc
 
@@ -522,6 +551,20 @@ class HamrahMechanicEstimator:
                     # exceeded") and correctly counts it toward the circuit
                     # breaker, same as every other navigation failure.
                     raise navigation_error
+                # Genuinely ran out of poll time without the URL ever
+                # resolving - just as real a "Hamrah Mechanic isn't
+                # responding" signal as an outright exception, so it needs
+                # to count toward the circuit breaker the same way, while
+                # keeping the page-text diagnostic (more useful here than
+                # a generic timeout message would be).
+                self._consecutive_navigation_failures += 1
+                if self._consecutive_navigation_failures >= settings.estimator_circuit_breaker_threshold:
+                    self._breaker_tripped = True
+                    logger.warning(
+                        "Hamrah Mechanic failed %d times in a row - tripping circuit breaker for "
+                        "the rest of this scan cycle",
+                        self._consecutive_navigation_failures,
+                    )
                 page_excerpt = await self._capture_failure_diagnostics(page)
                 return EstimateResult(
                     estimated_price_toman=None,
@@ -529,7 +572,10 @@ class HamrahMechanicEstimator:
                     max_price_toman=None,
                     raw_text=None,
                     success=False,
-                    error=f"page didn't navigate to a resolved car URL after submit - {page_excerpt}",
+                    error=(
+                        f"page didn't navigate to a resolved car URL after "
+                        f"{settings.estimate_navigation_timeout_ms}ms - {page_excerpt}"
+                    ),
                 )
             brand_slug, model_slug, year_slug, type_id = match.groups()
 
@@ -715,7 +761,10 @@ class HamrahMechanicEstimator:
             query = query.strip()
             if not query:
                 continue
-            await page.locator(SELECTORS["brand_model_input"]).fill(query)
+            filled, fill_error = await self._safe_fill(page.locator(SELECTORS["brand_model_input"]), query)
+            if not filled:
+                logger.warning("Hamrah Mechanic: brand/model input not fillable for '%s' - %s", query, fill_error)
+                continue
             await page.wait_for_timeout(800)  # debounce + results render
 
             results = page.locator(SELECTORS["picker_result_item"])
@@ -742,7 +791,14 @@ class HamrahMechanicEstimator:
                 query = query.strip()
                 if not query:
                     continue
-                await page.locator(SELECTORS["brand_model_input"]).fill(query)
+                filled, fill_error = await self._safe_fill(page.locator(SELECTORS["brand_model_input"]), query)
+                if not filled:
+                    logger.warning(
+                        "Hamrah Mechanic: brand/model input not fillable for '%s' (fallback pass) - %s",
+                        query,
+                        fill_error,
+                    )
+                    continue
                 await page.wait_for_timeout(800)
                 results = page.locator(SELECTORS["picker_result_item"])
                 if not await results.count():

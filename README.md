@@ -304,14 +304,21 @@ Two related things worth knowing about this specific error:
   "didn't navigate anywhere" error with no indication of the real cause).
   This is expected for very new/rare car models Hamrah Mechanic simply
   doesn't carry yet — not something to "fix" further.
-- If the brand/model **was** found but this error still shows up, it's
-  almost always the same network-slowness pattern discussed above: the
-  post-submit navigation and the follow-up JSON API call both wait up to
-  `ESTIMATE_NAVIGATION_TIMEOUT_MS` (default 45000) - raise it if this
-  keeps happening alongside literal `Request timed out after Xms` errors,
-  which confirm it's a timing issue rather than a real failure. Real
-  production evidence showed 30s (the previous default) still wasn't
-  always enough.
+- If the brand/model **was** found but this error still shows up, the
+  actual root cause (confirmed from a real timeout log) was that
+  `page.wait_for_url()` defaults to waiting for the browser's `load`
+  event — meaning it was waiting for *every image on this photo-heavy
+  page* (similar-car thumbnails, etc.) to finish loading, not just for
+  the URL itself to change. Raising the timeout further was a dead end,
+  since a slow enough network could make `load` take arbitrarily long
+  regardless. The real fix was to stop using `wait_for_url()` entirely and
+  poll `page.url` directly instead — this only checks the URL string
+  (which updates near-instantly on a client-side Next.js route push) and
+  is completely indifferent to whatever else on the page is still
+  loading. `ESTIMATE_NAVIGATION_TIMEOUT_MS` (default 45000) still bounds
+  the poll and the follow-up JSON API call, but shouldn't need raising
+  further for this specific failure now that it's not waiting on the
+  wrong thing.
   (Historical notes on this specific error path, since it went through a
   couple of real bugs before settling: an earlier version reset the
   circuit-breaker failure counter just for reaching Hamrah Mechanic's
@@ -321,8 +328,8 @@ Two related things worth knowing about this specific error:
   post-submit navigation timeout instead of surfacing it, which both hid
   the real reason behind the generic "didn't navigate" message *and* kept
   it from ever counting toward the circuit breaker at all — fixed by
-  re-raising that timeout so it's reported and counted like every other
-  navigation failure.)
+  re-raising real exceptions, and by counting a genuine poll-timeout
+  toward the breaker too even though polling itself never raises one.)
 
 If `list_new_listings` finds listings fine but `get_listing_detail` keeps
 logging `TimeoutError: Page.goto: Timeout ... exceeded`, this usually means
