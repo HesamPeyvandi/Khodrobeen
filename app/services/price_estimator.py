@@ -55,7 +55,9 @@ settings apply here too, since Hamrah Mechanic is also an Iran-hosted site.
 
 import asyncio
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
@@ -405,10 +407,54 @@ class HamrahMechanicEstimator:
             if not await modal.count():
                 return
 
+        dump_path = await self._dump_stuck_modal_diagnostics(page, modal)
         logger.warning(
             "Hamrah Mechanic: car picker modal still open after all close attempts - "
-            "later fields will likely fail with 'subtree intercepts pointer events'"
+            "later fields will likely fail with 'subtree intercepts pointer events'%s",
+            f" - diagnostics saved to {dump_path}" if dump_path else "",
         )
+
+    async def _dump_stuck_modal_diagnostics(self, page: Page, modal: Locator) -> str | None:
+        """DIAGNOSTIC ONLY - not a fix. Runs exactly once, only at the exact
+        moment _close_car_picker_modal() has genuinely given up (all close
+        attempts failed), which manual/slow clicking in a real browser has
+        not been able to reproduce - so instead of guessing a selector fix,
+        this captures the real DOM at the real moment of failure, straight
+        from the actual bot run, to a local file for inspection. Best-effort
+        and non-fatal: any failure here must never break the scan itself.
+        """
+        try:
+            debug_dir = os.path.join(os.getcwd(), "debug_modal_dumps")
+            os.makedirs(debug_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            dump_path = os.path.join(debug_dir, f"stuck_modal_{timestamp}.html")
+
+            modal_html = "(#modal-root had no matching element at dump time)"
+            if await modal.count():
+                try:
+                    modal_html = await modal.first.evaluate("el => el.outerHTML")
+                except Exception as exc:
+                    modal_html = f"(couldn't read outerHTML: {exc.__class__.__name__})"
+
+            full_modal_root_html = "(#modal-root not found)"
+            root = page.locator("#modal-root")
+            if await root.count():
+                try:
+                    full_modal_root_html = await root.first.evaluate("el => el.outerHTML")
+                except Exception as exc:
+                    full_modal_root_html = f"(couldn't read outerHTML: {exc.__class__.__name__})"
+
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(f"<!-- captured at {timestamp}, page url: {page.url} -->\n\n")
+                f.write("<!-- ===== element(s) matched by our current modal selector ===== -->\n")
+                f.write(modal_html + "\n\n")
+                f.write("<!-- ===== full #modal-root contents ===== -->\n")
+                f.write(full_modal_root_html + "\n")
+
+            return dump_path
+        except Exception as exc:
+            logger.warning("Hamrah Mechanic: couldn't save stuck-modal diagnostics (%s)", exc.__class__.__name__)
+            return None
 
     def __init__(self) -> None:
         self._playwright = None
